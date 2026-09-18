@@ -54,24 +54,34 @@ function pump() {
     pumpQueue(sendHooks);
 }
 
-// ---------- 流式输出中劫持 Enter ----------
-// 正在生成时按 Enter 不再被站点忽略，而是把内容收进队列。
+// ---------- 劫持 Enter ----------
+// Enter 一律入队（空闲时由队列立刻发出，效果与直发一致）；
+// Ctrl/Cmd+Enter 放行给官方直发，作为绕过队列的逃生口；
+// Shift+Enter 保持换行。
 function onComposerKeydownCapture(event) {
-    if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
+    if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.isComposing) return;
+    // 带 Ctrl/Cmd 时不拦截，交给 ChatGPT 自己处理。
+    if (event.ctrlKey || event.metaKey) return;
 
     const composer = composerNode();
-    if (!composer || document.activeElement !== composer || !isStreaming()) return;
+    if (!composer || document.activeElement !== composer) return;
 
     event.preventDefault();
     event.stopImmediatePropagation?.();
     event.stopPropagation();
 
     const text = currentComposerText();
+    // 即使没有可入队的文本也要清一次，抹掉 ProseMirror 可能残留的空白节点。
     if (text) {
         enqueuePrompt(text);
         renderQueueHard();
     }
     clearComposer();
+    if (!text) return;
+
+    // 空闲时立即发出，避免等到下一次轮询才发送、显得慢半拍；
+    // 生成中则由发送按钮的状态变化触发。
+    if (!isStreaming()) pump();
 }
 
 function attachComposerListeners() {

@@ -24,6 +24,14 @@ Enter，消息进入输入框上方的队列；ChatGPT 一答完，队列里的�
 
 适合让 ChatGPT 分步讲解时随时插问、连续抛出多个追问、或跑多步骤工作流。
 
+### 快捷键
+
+| 按键 | 行为 |
+|---|---|
+| `Enter` | 消息进入队列（空闲时队列立即发出，效果与直接发送一致） |
+| `Ctrl+Enter` / `Cmd+Enter` | 绕过队列，走 ChatGPT 官方直接发送 |
+| `Shift+Enter` | 换行 |
+
 > 本项目接手自 [maribox](https://github.com/maribox/my_userscripts) 的
 > [ChatGPT Message Queue](https://greasyfork.org/en/scripts/561517-chatgpt-message-queue)（MIT，已停止维护），
 > 在其基础上重构并继续维护。署名与出处见 [`NOTICE.md`](./NOTICE.md)。
@@ -38,7 +46,8 @@ Enter，消息进入输入框上方的队列；ChatGPT 一答完，队列里的�
 
 | 功能 | 说明 |
 |---|---|
-| 生成中入队 | 流式输出时按 Enter，消息进入队列而非被丢弃 |
+| Enter 入队 | 按 Enter 一律进入队列；生成中也不会被丢弃 |
+| 官方直发保留 | `Ctrl+Enter` / `Cmd+Enter` 绕过队列直接发送 |
 | 自动发送 | 检测到生成结束，自动发出队首消息 |
 | 拖拽排序 | 拖左侧手柄调整顺序，带插入位置指示线 |
 | 编辑 / 删除 | 行内编辑（Enter 保存、Shift+Enter 换行、Esc 取消） |

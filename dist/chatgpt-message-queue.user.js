@@ -3,8 +3,8 @@
 // @name:zh-CN   ChatGPT 消息队列（续维护版）
 // @namespace    https://github.com/Zker67/chatgpt-web-message-queue
 // @version      1.1.0
-// @description  Queue prompts while ChatGPT is generating and auto-send when ready. Drag to reorder, edit/delete, merge and per-conversation persistence. Bilingual UI.
-// @description:zh-CN  ChatGPT 生成中也能继续输入：消息先入队，生成结束后自动发送。支持拖拽排序、编辑删除、合并发送与按会话持久化，中英双语界面。
+// @description  Enter queues your prompt, auto-sent as soon as ChatGPT is ready; Ctrl+Enter still sends directly. Drag to reorder, edit/delete, merge and per-conversation persistence. Bilingual UI.
+// @description:zh-CN  Enter 把消息送入队列，ChatGPT 一答完就自动发出；Ctrl+Enter 仍走官方直接发送。支持拖拽排序、编辑删除、合并发送与按会话持久化，中英双语界面。
 // @author       zker67
 // @license      MIT
 // @match        https://chatgpt.com/*
@@ -1471,24 +1471,34 @@
         pumpQueue(sendHooks);
     }
 
-    // ---------- 流式输出中劫持 Enter ----------
-    // 正在生成时按 Enter 不再被站点忽略，而是把内容收进队列。
+    // ---------- 劫持 Enter ----------
+    // Enter 一律入队（空闲时由队列立刻发出，效果与直发一致）；
+    // Ctrl/Cmd+Enter 放行给官方直发，作为绕过队列的逃生口；
+    // Shift+Enter 保持换行。
     function onComposerKeydownCapture(event) {
-        if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
+        if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.isComposing) return;
+        // 带 Ctrl/Cmd 时不拦截，交给 ChatGPT 自己处理。
+        if (event.ctrlKey || event.metaKey) return;
 
         const composer = composerNode();
-        if (!composer || document.activeElement !== composer || !isStreaming()) return;
+        if (!composer || document.activeElement !== composer) return;
 
         event.preventDefault();
         event.stopImmediatePropagation?.();
         event.stopPropagation();
 
         const text = currentComposerText();
+        // 即使没有可入队的文本也要清一次，抹掉 ProseMirror 可能残留的空白节点。
         if (text) {
             enqueuePrompt(text);
             renderQueueHard();
         }
         clearComposer();
+        if (!text) return;
+
+        // 空闲时立即发出，避免等到下一次轮询才发送、显得慢半拍；
+        // 生成中则由发送按钮的状态变化触发。
+        if (!isStreaming()) pump();
     }
 
     function attachComposerListeners() {
