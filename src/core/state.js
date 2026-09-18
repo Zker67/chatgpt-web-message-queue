@@ -31,6 +31,8 @@ export let pendingEnterCountFromBottom = 0;
 
 // 连续发送失败次数，达到阈值后由 UI 层提示。
 export let consecutiveSendFailures = 0;
+// 上次发送尝试的时间戳，用于冷却。
+export let lastSendAttemptAt = 0;
 
 export const setCurrentConversationKey = (value) => { currentConversationKey = value; };
 export const setPromptQueue = (value) => { promptQueue = value; };
@@ -53,6 +55,7 @@ export const setPendingDraftRestore = (value) => { pendingDraftRestore = value; 
 export const setLastRenderedQueueSnapshot = (value) => { lastRenderedQueueSnapshot = value; };
 export const setPendingEnterCountFromBottom = (value) => { pendingEnterCountFromBottom = value; };
 export const setConsecutiveSendFailures = (value) => { consecutiveSendFailures = value; };
+export const setLastSendAttemptAt = (value) => { lastSendAttemptAt = value; };
 
 // 拖拽中或行内编辑中一律不发送、不重渲染，避免用户操作被打断。
 export const isInteracting = () => isDragging || activeEditIndex !== null;

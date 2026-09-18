@@ -8,9 +8,16 @@ export const storageKeyLocale = 'cgpt_message_queue_locale_v1';
 
 // ---------- 时序 ----------
 export const pollIntervalMilliseconds = 1200;
-export const transactionWaitMilliseconds = 0;
-export const sendEnableWaitMilliseconds = 0;
-export const streamingStartWaitMilliseconds = 0;
+// 注入文本后等 ProseMirror 确认收到的上限。
+export const transactionWaitMilliseconds = 800;
+// 注入后等发送按钮变为可用的上限（按钮随输入内容异步启用）。
+export const sendEnableWaitMilliseconds = 1500;
+// 点击后等「确实发出去了」的上限：进入生成态，或输入框被 ChatGPT 清空。
+export const sendConfirmWaitMilliseconds = 3000;
+// 两次发送尝试之间的最短间隔，无论成败。杜绝检测失灵时连发同一条。
+export const sendCooldownMilliseconds = 2500;
+// 发出后若始终没观察到生成态（检测可能失灵），额外延长冷却，避免对方还没答完就连发下一条。
+export const unconfirmedStreamingExtraCooldownMilliseconds = 6000;
 
 // 草稿恢复重试阶梯：对抗 ChatGPT 发送后对 composer 的异步清空。
 export const draftRestoreRetryDelays = [0, 40, 120, 260, 420, 700, 1100, 1600, 2300, 3200];

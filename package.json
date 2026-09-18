@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/logic-test.mjs",
+    "test": "node scripts/logic-test.mjs && node scripts/sender-test.mjs",
     "check": "npm run build && node --check dist/chatgpt-message-queue.user.js && npm test"
   },
   "keywords": [

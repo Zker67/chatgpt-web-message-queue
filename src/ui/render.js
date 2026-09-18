@@ -1,5 +1,5 @@
 import { queueHostId, exitDeleteAnimationMilliseconds } from '../constants.js';
-import { composerAnchorNode } from '../platform/selectors.js';
+import { composerFormNode } from '../platform/selectors.js';
 import {
     queueHostNode, setQueueHostNode,
     hostListenersAttached, setHostListenersAttached,
@@ -22,17 +22,10 @@ let renderHooks = {};
 export function setRenderHooks(hooks) { renderHooks = hooks || {}; }
 
 export function ensureQueueHost() {
-    const anchor = composerAnchorNode();
-    if (!anchor?.parentElement) return null;
+    if (!composerFormNode()) return null;
 
-    // 面板须紧贴在输入区外框之前；位置不对（如 ChatGPT 重建了 DOM）就重新挂载。
-    const isMountedCorrectly =
-        queueHostNode
-        && queueHostNode.parentElement === anchor.parentElement
-        && queueHostNode.nextElementSibling === anchor;
-
-    if (queueHostNode && !isMountedCorrectly) {
-        queueHostNode.remove();
+    // 面板永远挂在 body 上；被 ChatGPT 的整页重渲染移除时重新创建。
+    if (queueHostNode && !queueHostNode.isConnected) {
         setQueueHostNode(null);
         setHostListenersAttached(false);
     }
@@ -41,12 +34,11 @@ export function ensureQueueHost() {
         const host = document.createElement('div');
         host.id = queueHostId;
         host.contentEditable = 'false';
+        host.setAttribute('role', 'region');
         host.style.cssText = queueHostStyle();
-        // 作为兄弟节点插在输入区之前，绝不进入其内部。
-        anchor.parentElement.insertBefore(host, anchor);
+        host.style.display = 'none';
+        document.body.appendChild(host);
         setQueueHostNode(host);
-    } else {
-        queueHostNode.style.cssText = queueHostStyle();
     }
 
     if (!hostListenersAttached) {
@@ -57,6 +49,33 @@ export function ensureQueueHost() {
     }
 
     return queueHostNode;
+}
+
+// 按输入框外框的坐标把面板贴在其上方。用 bottom 定位，队列变长时向上生长。
+export function positionQueueHost() {
+    const host = queueHostNode;
+    if (!host || host.style.display === 'none') return;
+
+    const form = composerFormNode();
+    if (!form) { host.style.display = 'none'; return; }
+
+    const rect = form.getBoundingClientRect();
+    if (!rect.width) { host.style.display = 'none'; return; }
+
+    const gapPixels = 8;
+    host.style.left = `${Math.round(rect.left)}px`;
+    host.style.width = `${Math.round(rect.width)}px`;
+    host.style.bottom = `${Math.round(window.innerHeight - rect.top + gapPixels)}px`;
+}
+
+function showQueueHost(host) {
+    host.style.cssText = queueHostStyle();
+    host.style.display = 'flex';
+    positionQueueHost();
+}
+
+function hideQueueHost(host) {
+    host.style.display = 'none';
 }
 
 // 构建单行。editing 为 true 时该行进入可编辑态。
@@ -79,6 +98,12 @@ function buildQueueRow(index, { editing, anyEditing }) {
     itemBox.contentEditable = 'false';
     itemBox.dataset.queueBox = 'true';
     itemBox.style.cssText = queueItemBoxStyle();
+
+    const indexBadge = document.createElement('span');
+    indexBadge.contentEditable = 'false';
+    indexBadge.textContent = `#${index + 1}`;
+    indexBadge.style.cssText = 'flex:0 0 auto;opacity:.55;font-size:12px;line-height:1.4;padding-top:2px;user-select:none;';
+    itemBox.appendChild(indexBadge);
 
     const text = document.createElement('div');
     text.contentEditable = editing ? 'true' : 'false';
@@ -180,7 +205,8 @@ export function renderQueue() {
     setLastRenderedQueueSnapshot(promptQueue.slice());
 
     host.innerHTML = '';
-    if (promptQueue.length === 0) return;
+    if (promptQueue.length === 0) { hideQueueHost(host); return; }
+    showQueueHost(host);
 
     for (let index = 0; index < promptQueue.length; index++) {
         const { rowWrapper } = buildQueueRow(index, { editing: false, anyEditing: false });
@@ -210,6 +236,7 @@ export function beginInlineEdit(index) {
     setActiveEditOriginalText(promptQueue[index]);
 
     host.innerHTML = '';
+    showQueueHost(host);
 
     let editingTextNode = null;
     for (let i = 0; i < promptQueue.length; i++) {

@@ -1,7 +1,9 @@
 import {
     transactionWaitMilliseconds,
     sendEnableWaitMilliseconds,
-    streamingStartWaitMilliseconds,
+    sendConfirmWaitMilliseconds,
+    sendCooldownMilliseconds,
+    unconfirmedStreamingExtraCooldownMilliseconds,
     draftRestoreRetryDelays,
     sendFailureNoticeThreshold,
 } from '../constants.js';
@@ -12,6 +14,7 @@ import {
     currentComposerText,
     setComposerText,
     appendComposerText,
+    clearComposer,
     clickSubmitButtonHuman,
 } from '../platform/composer.js';
 import {
@@ -21,6 +24,7 @@ import {
     isQueuePumpRunning, setIsQueuePumpRunning,
     pendingDraftRestore, setPendingDraftRestore,
     consecutiveSendFailures, setConsecutiveSendFailures,
+    lastSendAttemptAt, setLastSendAttemptAt,
     isInteracting,
 } from './state.js';
 import { persistCurrentStateIfPossible } from './queue.js';
@@ -84,10 +88,14 @@ export function tryRestorePendingDraft() {
 }
 
 // ---------- 发送 ----------
-// 每一步都校验 sendCancellationToken，用户一旦干预即刻放弃本次尝试；
-// 只有确认真的进入流式输出才出队，确保失败时消息不丢。
+// 每一步都校验 sendCancellationToken，用户一旦干预即刻放弃本次尝试。
+// 只有确认「确实发出去了」才出队；失败则撤回注入的文本，不留残渣。
 export async function sendNextQueuedPrompt(hooks = {}) {
     if (!promptQueue.length || isStreaming() || isInteracting()) return false;
+
+    // 冷却：无论上次成败，都要间隔足够时间。检测一旦失灵，这是防连发的最后闸门。
+    if (Date.now() - lastSendAttemptAt < sendCooldownMilliseconds) return false;
+    setLastSendAttemptAt(Date.now());
 
     const myAttemptToken = sendCancellationToken;
 
@@ -104,19 +112,24 @@ export async function sendNextQueuedPrompt(hooks = {}) {
         transactionWaitMilliseconds
     );
     if (sendCancellationToken !== myAttemptToken) return false;
-    if (!editorAcknowledgedText) return noteSendFailure(hooks);
+    if (!editorAcknowledgedText) return abortAttempt(savedDraftText, hooks);
 
-    const sendButtonEnabled = await waitFor(() => !isStreaming() && isSendEnabled(), sendEnableWaitMilliseconds);
+    const sendButtonEnabled = await waitFor(() => isSendEnabled(), sendEnableWaitMilliseconds);
     if (sendCancellationToken !== myAttemptToken) return false;
-    if (!sendButtonEnabled) return noteSendFailure(hooks);
+    if (!sendButtonEnabled) return abortAttempt(savedDraftText, hooks);
 
+    // 记下点击前输入框里实际渲染出的文本，作为「是否已被 ChatGPT 清空」的对照。
+    const renderedBeforeClick = currentComposerText();
     clickSubmitButtonHuman();
     if (sendCancellationToken !== myAttemptToken) return false;
 
-    // 必须确认进入流式输出，否则视为没发出去，不出队。
-    const streamingStarted = await waitFor(() => isStreaming(), streamingStartWaitMilliseconds);
+    // 发出确认：进入生成态，或者输入框内容已不再是我们注入的那段（官方发送后会清空）。
+    const sendConfirmed = await waitFor(
+        () => isStreaming() || currentComposerText() !== renderedBeforeClick,
+        sendConfirmWaitMilliseconds
+    );
     if (sendCancellationToken !== myAttemptToken) return false;
-    if (!streamingStarted) return noteSendFailure(hooks);
+    if (!sendConfirmed) return abortAttempt(savedDraftText, hooks);
 
     if (savedDraftText) scheduleDraftRestore(savedDraftText, myAttemptToken);
 
@@ -126,9 +139,21 @@ export async function sendNextQueuedPrompt(hooks = {}) {
     promptQueue.shift();
     persistCurrentStateIfPossible();
 
+    // 冷却从本次尝试结束时起算；若没观察到生成态，说明检测可能失灵，额外拉长。
+    setLastSendAttemptAt(Date.now() + (isStreaming() ? 0 : unconfirmedStreamingExtraCooldownMilliseconds));
+
     setConsecutiveSendFailures(0);
     hooks.onQueueChanged?.();
     return true;
+}
+
+// 发送失败：撤掉注入的队列文本，把用户原本的草稿放回去，避免越积越多。
+function abortAttempt(savedDraftText, hooks) {
+    if (savedDraftText) setComposerText(savedDraftText);
+    else clearComposer();
+    // 一次失败尝试本身可能耗时数秒，冷却必须从结束时刻起算才有意义。
+    setLastSendAttemptAt(Date.now());
+    return noteSendFailure(hooks);
 }
 
 // 上游此处静默返回，用户不知道队列卡住；这里累计失败并在达阈值时提示。

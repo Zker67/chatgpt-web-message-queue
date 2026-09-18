@@ -32,15 +32,27 @@ const composerSelectors = [
     // 匹配到 textarea 会得到一个读不出也写不进的节点，比直接报错更糟。
 ];
 
-const submitButtonSelectors = [
-    'button#composer-submit-button',
-    'button[data-testid="send-button"]',
+// 界面可能是中文，aria-label 也随之本地化，判定必须中英同时覆盖。
+const sendLabelPattern = /send|submit|发送|提交|傳送/i;
+const stopLabelPattern = /stop|cancel|停止|中止|终止|取消/i;
+
+const stopButtonSelectors = [
     'button[data-testid="stop-button"]',
-    'form button[type="submit"]',
+    'button[data-testid*="stop"]',
+    'button#composer-submit-button[aria-label*="停止"]',
+    'button#composer-submit-button[aria-label*="Stop"]',
 ];
 
-// 队列面板的锚点：整个输入区外框。面板会作为它的前置兄弟节点插入，
-// 绝不能落进可编辑子树里，否则 ChatGPT 会把面板文字当成输入内容一起发出。
+const sendButtonSelectors = [
+    'button[data-testid="send-button"]',
+    'button#composer-submit-button',
+    'button[data-testid*="send"]',
+    'form button[type="submit"]',
+    'button[aria-label*="发送"]',
+    'button[aria-label*="Send"]',
+];
+
+// 输入区外框：用于计算悬浮面板的位置，面板本身不再挂进这棵子树。
 const composerFormSelectors = [
     'form[data-type="unified-composer"]',
     'main form',
@@ -51,33 +63,26 @@ export function composerNode() {
     return querySelectorChain(composerSelectors);
 }
 
-export function submitButtonNode() {
-    return querySelectorChain(submitButtonSelectors);
-}
-
-// 返回队列面板的锚点元素；面板将插入到它前面，成为其兄弟节点。
-export function composerAnchorNode() {
+// 输入框所在的表单（或最外层可编辑容器之外的那一层），只用于取坐标。
+export function composerFormNode() {
     const composer = composerNode();
     if (!composer) return null;
 
     for (const selector of composerFormSelectors) {
         try {
             const found = composer.closest(selector);
-            // 锚点必须有父节点，才能在其之前插入兄弟节点。
-            if (found?.parentElement) return found;
+            if (found) return found;
         } catch { }
     }
 
-    // 兜底：面板会插到锚点之前，即落在「锚点的父节点」里，
-    // 因此要一直上溯到父节点不再属于任何可编辑区域为止。
+    // 兜底：向上走到脱离所有可编辑区域为止，取那一层作为外框。
     let node = composer;
     while (node.parentElement && isInsideEditable(node.parentElement)) {
         node = node.parentElement;
     }
-    return node.parentElement ? node : null;
+    return node;
 }
 
-// 元素自身或其祖先是否处于 contenteditable 区域内。
 function isInsideEditable(element) {
     try {
         return Boolean(element.closest?.('[contenteditable="true"]'));
@@ -86,28 +91,83 @@ function isInsideEditable(element) {
     }
 }
 
+function labelOf(button) {
+    return [
+        button.getAttribute('aria-label'),
+        button.getAttribute('title'),
+        button.getAttribute('data-testid'),
+    ].filter(Boolean).join(' ');
+}
+
+function isVisible(element) {
+    try {
+        if (!element.isConnected) return false;
+        const style = getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    } catch {
+        return true;
+    }
+}
+
+// 停止按钮：新版 ChatGPT 中它与发送按钮可能是两个不同元素，而非同一按钮换状态，
+// 所以不能只盯一个节点的属性，而要在整个输入区里找。
+export function stopButtonNode() {
+    const direct = querySelectorChain(stopButtonSelectors);
+    if (direct && isVisible(direct)) return direct;
+
+    const form = composerFormNode();
+    if (!form) return null;
+    for (const button of form.querySelectorAll('button')) {
+        if (!isVisible(button)) continue;
+        const label = labelOf(button);
+        if (stopLabelPattern.test(label) && !sendLabelPattern.test(label)) return button;
+    }
+    return null;
+}
+
+export function submitButtonNode() {
+    const direct = querySelectorChain(sendButtonSelectors);
+    if (direct) return direct;
+
+    const form = composerFormNode();
+    if (!form) return null;
+    for (const button of form.querySelectorAll('button')) {
+        if (sendLabelPattern.test(labelOf(button))) return button;
+    }
+    return null;
+}
+
 export function submitButtonMode() {
     const button = submitButtonNode();
     if (!button) return null;
 
-    const testId = button.getAttribute('data-testid');
-    if (testId) return testId;
+    const testId = button.getAttribute('data-testid') || '';
+    if (/stop/i.test(testId)) return 'stop-button';
+    if (/send/i.test(testId)) return 'send-button';
 
-    // 没有 data-testid 时按 aria-label 粗判，作为改版后的兜底。
-    const label = (button.getAttribute('aria-label') || '').toLowerCase();
-    if (label.includes('stop')) return 'stop-button';
-    if (label.includes('send')) return 'send-button';
+    const label = labelOf(button);
+    if (stopLabelPattern.test(label)) return 'stop-button';
+    if (sendLabelPattern.test(label)) return 'send-button';
     return null;
 }
 
+// 多信号综合判定是否正在生成：任何一个信号为真即视为生成中。
 export function isStreaming() {
-    return submitButtonMode() === 'stop-button';
+    if (stopButtonNode()) return true;
+    if (submitButtonMode() === 'stop-button') return true;
+    try {
+        if (document.querySelector('.result-streaming, [data-is-streaming="true"], [data-message-streaming="true"]')) return true;
+    } catch { }
+    return false;
 }
 
 export function isSendEnabled() {
+    if (isStreaming()) return false;
     const button = submitButtonNode();
     if (!button) return false;
-    if (submitButtonMode() !== 'send-button') return false;
+    if (submitButtonMode() === 'stop-button') return false;
     if (button.disabled) return false;
     if ((button.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
     try {
@@ -128,6 +188,27 @@ export function resetSelectorFailureReport() {
     selectorFailureReported = false;
 }
 
-export function hasComposer() {
-    return Boolean(composerNode());
+// 诊断信息：页面改版排查用，在控制台调用 __cmqDiag() 即可。
+export function collectDiagnostics() {
+    const describe = (element) => element ? {
+        tag: element.tagName,
+        id: element.id || null,
+        testid: element.getAttribute('data-testid'),
+        label: element.getAttribute('aria-label'),
+        disabled: element.disabled ?? null,
+        className: String(element.className || '').slice(0, 120),
+    } : null;
+
+    const form = composerFormNode();
+    return {
+        url: location.href,
+        composer: describe(composerNode()),
+        form: describe(form),
+        submitButton: describe(submitButtonNode()),
+        stopButton: describe(stopButtonNode()),
+        submitButtonMode: submitButtonMode(),
+        isStreaming: isStreaming(),
+        isSendEnabled: isSendEnabled(),
+        formButtons: form ? Array.from(form.querySelectorAll('button')).map(describe) : [],
+    };
 }

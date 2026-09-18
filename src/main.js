@@ -1,5 +1,5 @@
 import { pollIntervalMilliseconds, exitSendAnimationMilliseconds, composerMissNoticeThreshold } from './constants.js';
-import { composerNode, submitButtonNode, isStreaming, reportSelectorFailureOnce, resetSelectorFailureReport } from './platform/selectors.js';
+import { composerNode, composerFormNode, isStreaming, reportSelectorFailureOnce, resetSelectorFailureReport, collectDiagnostics } from './platform/selectors.js';
 import { currentComposerText, clearComposer, sleep } from './platform/composer.js';
 import {
     promptQueue,
@@ -14,7 +14,7 @@ import {
 import { switchConversationIfNeeded, enqueuePrompt, persistCurrentStateIfPossible } from './core/queue.js';
 import { pumpQueue, tryRestorePendingDraft } from './core/sender.js';
 import { ensureAnimationStyles } from './ui/styles.js';
-import { ensureQueueHost, renderQueue, renderQueueHard, setRenderHooks } from './ui/render.js';
+import { ensureQueueHost, positionQueueHost, renderQueue, renderQueueHard, setRenderHooks } from './ui/render.js';
 import { showNoticeOnce, clearNotice } from './ui/notice.js';
 import { normalizeText } from './platform/composer.js';
 
@@ -97,22 +97,33 @@ function attachComposerListeners() {
     composer.addEventListener('keydown', onComposerKeydownCapture, true);
 }
 
-// 盯住发送按钮状态：从 stop-button 变回 send-button 即代表生成结束，可以发下一条。
+// 新版 ChatGPT 的发送 / 停止按钮可能是两个元素互相替换，而非同一按钮改属性，
+// 因此改为观察整个输入区子树，任何变化都重新评估是否可以发下一条。
+let observerEvaluationScheduled = false;
 function attachSubmitButtonObserver() {
-    const button = submitButtonNode();
-    if (!button || button === attachedSubmitButtonNode) return;
+    const form = composerFormNode();
+    if (!form || form === attachedSubmitButtonNode) return;
 
-    setAttachedSubmitButtonNode(button);
+    setAttachedSubmitButtonNode(form);
 
     submitButtonMutationObserver?.disconnect();
     const observer = new MutationObserver(() => {
-        if (!isStreaming() && promptQueue.length && !isInteracting()) pump();
-        if (pendingDraftRestore) tryRestorePendingDraft();
+        // 合并同一帧内的多次变动，避免高频触发。
+        if (observerEvaluationScheduled) return;
+        observerEvaluationScheduled = true;
+        requestAnimationFrame(() => {
+            observerEvaluationScheduled = false;
+            if (!isStreaming() && promptQueue.length && !isInteracting()) pump();
+            if (pendingDraftRestore) tryRestorePendingDraft();
+            positionQueueHost();
+        });
     });
 
-    observer.observe(button, {
+    observer.observe(form, {
+        childList: true,
+        subtree: true,
         attributes: true,
-        attributeFilter: ['data-testid', 'disabled', 'aria-disabled', 'aria-label'],
+        attributeFilter: ['data-testid', 'disabled', 'aria-disabled', 'aria-label', 'class'],
     });
     setSubmitButtonMutationObserver(observer);
 }
@@ -182,10 +193,18 @@ function tick() {
     attachSubmitButtonObserver();
 
     if (!isDragging) renderQueue();
+    positionQueueHost();
 
     if (pendingDraftRestore) tryRestorePendingDraft();
     if (promptQueue.length && !isStreaming() && !isInteracting()) pump();
 }
+
+// 视口或布局变化时重新贴合输入框。
+window.addEventListener('resize', positionQueueHost, true);
+window.addEventListener('scroll', positionQueueHost, true);
+
+// 控制台诊断入口：页面改版时让用户一键导出关键节点信息。
+try { window.__cmqDiag = () => collectDiagnostics(); } catch { }
 
 // ---------- 启动 ----------
 ensureAnimationStyles();

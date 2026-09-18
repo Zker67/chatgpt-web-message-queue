@@ -32,9 +32,16 @@
 
     // ---------- 时序 ----------
     const pollIntervalMilliseconds = 1200;
-    const transactionWaitMilliseconds = 0;
-    const sendEnableWaitMilliseconds = 0;
-    const streamingStartWaitMilliseconds = 0;
+    // 注入文本后等 ProseMirror 确认收到的上限。
+    const transactionWaitMilliseconds = 800;
+    // 注入后等发送按钮变为可用的上限（按钮随输入内容异步启用）。
+    const sendEnableWaitMilliseconds = 1500;
+    // 点击后等「确实发出去了」的上限：进入生成态，或输入框被 ChatGPT 清空。
+    const sendConfirmWaitMilliseconds = 3000;
+    // 两次发送尝试之间的最短间隔，无论成败。杜绝检测失灵时连发同一条。
+    const sendCooldownMilliseconds = 2500;
+    // 发出后若始终没观察到生成态（检测可能失灵），额外延长冷却，避免对方还没答完就连发下一条。
+    const unconfirmedStreamingExtraCooldownMilliseconds = 6000;
 
     // 草稿恢复重试阶梯：对抗 ChatGPT 发送后对 composer 的异步清空。
     const draftRestoreRetryDelays = [0, 40, 120, 260, 420, 700, 1100, 1600, 2300, 3200];
@@ -173,15 +180,27 @@
         // 匹配到 textarea 会得到一个读不出也写不进的节点，比直接报错更糟。
     ];
 
-    const submitButtonSelectors = [
-        'button#composer-submit-button',
-        'button[data-testid="send-button"]',
+    // 界面可能是中文，aria-label 也随之本地化，判定必须中英同时覆盖。
+    const sendLabelPattern = /send|submit|发送|提交|傳送/i;
+    const stopLabelPattern = /stop|cancel|停止|中止|终止|取消/i;
+
+    const stopButtonSelectors = [
         'button[data-testid="stop-button"]',
-        'form button[type="submit"]',
+        'button[data-testid*="stop"]',
+        'button#composer-submit-button[aria-label*="停止"]',
+        'button#composer-submit-button[aria-label*="Stop"]',
     ];
 
-    // 队列面板的锚点：整个输入区外框。面板会作为它的前置兄弟节点插入，
-    // 绝不能落进可编辑子树里，否则 ChatGPT 会把面板文字当成输入内容一起发出。
+    const sendButtonSelectors = [
+        'button[data-testid="send-button"]',
+        'button#composer-submit-button',
+        'button[data-testid*="send"]',
+        'form button[type="submit"]',
+        'button[aria-label*="发送"]',
+        'button[aria-label*="Send"]',
+    ];
+
+    // 输入区外框：用于计算悬浮面板的位置，面板本身不再挂进这棵子树。
     const composerFormSelectors = [
         'form[data-type="unified-composer"]',
         'main form',
@@ -190,33 +209,27 @@
     function composerNode() {
         return querySelectorChain(composerSelectors);
     }
-    function submitButtonNode() {
-        return querySelectorChain(submitButtonSelectors);
-    }
 
-    // 返回队列面板的锚点元素；面板将插入到它前面，成为其兄弟节点。
-    function composerAnchorNode() {
+    // 输入框所在的表单（或最外层可编辑容器之外的那一层），只用于取坐标。
+    function composerFormNode() {
         const composer = composerNode();
         if (!composer) return null;
 
         for (const selector of composerFormSelectors) {
             try {
                 const found = composer.closest(selector);
-                // 锚点必须有父节点，才能在其之前插入兄弟节点。
-                if (found?.parentElement) return found;
+                if (found) return found;
             } catch { }
         }
 
-        // 兜底：面板会插到锚点之前，即落在「锚点的父节点」里，
-        // 因此要一直上溯到父节点不再属于任何可编辑区域为止。
+        // 兜底：向上走到脱离所有可编辑区域为止，取那一层作为外框。
         let node = composer;
         while (node.parentElement && isInsideEditable(node.parentElement)) {
             node = node.parentElement;
         }
-        return node.parentElement ? node : null;
+        return node;
     }
 
-    // 元素自身或其祖先是否处于 contenteditable 区域内。
     function isInsideEditable(element) {
         try {
             return Boolean(element.closest?.('[contenteditable="true"]'));
@@ -224,26 +237,81 @@
             return false;
         }
     }
+
+    function labelOf(button) {
+        return [
+            button.getAttribute('aria-label'),
+            button.getAttribute('title'),
+            button.getAttribute('data-testid'),
+        ].filter(Boolean).join(' ');
+    }
+
+    function isVisible(element) {
+        try {
+            if (!element.isConnected) return false;
+            const style = getComputedStyle(element);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            const rect = element.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        } catch {
+            return true;
+        }
+    }
+
+    // 停止按钮：新版 ChatGPT 中它与发送按钮可能是两个不同元素，而非同一按钮换状态，
+    // 所以不能只盯一个节点的属性，而要在整个输入区里找。
+    function stopButtonNode() {
+        const direct = querySelectorChain(stopButtonSelectors);
+        if (direct && isVisible(direct)) return direct;
+
+        const form = composerFormNode();
+        if (!form) return null;
+        for (const button of form.querySelectorAll('button')) {
+            if (!isVisible(button)) continue;
+            const label = labelOf(button);
+            if (stopLabelPattern.test(label) && !sendLabelPattern.test(label)) return button;
+        }
+        return null;
+    }
+    function submitButtonNode() {
+        const direct = querySelectorChain(sendButtonSelectors);
+        if (direct) return direct;
+
+        const form = composerFormNode();
+        if (!form) return null;
+        for (const button of form.querySelectorAll('button')) {
+            if (sendLabelPattern.test(labelOf(button))) return button;
+        }
+        return null;
+    }
     function submitButtonMode() {
         const button = submitButtonNode();
         if (!button) return null;
 
-        const testId = button.getAttribute('data-testid');
-        if (testId) return testId;
+        const testId = button.getAttribute('data-testid') || '';
+        if (/stop/i.test(testId)) return 'stop-button';
+        if (/send/i.test(testId)) return 'send-button';
 
-        // 没有 data-testid 时按 aria-label 粗判，作为改版后的兜底。
-        const label = (button.getAttribute('aria-label') || '').toLowerCase();
-        if (label.includes('stop')) return 'stop-button';
-        if (label.includes('send')) return 'send-button';
+        const label = labelOf(button);
+        if (stopLabelPattern.test(label)) return 'stop-button';
+        if (sendLabelPattern.test(label)) return 'send-button';
         return null;
     }
+
+    // 多信号综合判定是否正在生成：任何一个信号为真即视为生成中。
     function isStreaming() {
-        return submitButtonMode() === 'stop-button';
+        if (stopButtonNode()) return true;
+        if (submitButtonMode() === 'stop-button') return true;
+        try {
+            if (document.querySelector('.result-streaming, [data-is-streaming="true"], [data-message-streaming="true"]')) return true;
+        } catch { }
+        return false;
     }
     function isSendEnabled() {
+        if (isStreaming()) return false;
         const button = submitButtonNode();
         if (!button) return false;
-        if (submitButtonMode() !== 'send-button') return false;
+        if (submitButtonMode() === 'stop-button') return false;
         if (button.disabled) return false;
         if ((button.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
         try {
@@ -263,8 +331,30 @@
     function resetSelectorFailureReport() {
         selectorFailureReported = false;
     }
-    function hasComposer() {
-        return Boolean(composerNode());
+
+    // 诊断信息：页面改版排查用，在控制台调用 __cmqDiag() 即可。
+    function collectDiagnostics() {
+        const describe = (element) => element ? {
+            tag: element.tagName,
+            id: element.id || null,
+            testid: element.getAttribute('data-testid'),
+            label: element.getAttribute('aria-label'),
+            disabled: element.disabled ?? null,
+            className: String(element.className || '').slice(0, 120),
+        } : null;
+
+        const form = composerFormNode();
+        return {
+            url: location.href,
+            composer: describe(composerNode()),
+            form: describe(form),
+            submitButton: describe(submitButtonNode()),
+            stopButton: describe(stopButtonNode()),
+            submitButtonMode: submitButtonMode(),
+            isStreaming: isStreaming(),
+            isSendEnabled: isSendEnabled(),
+            formButtons: form ? Array.from(form.querySelectorAll('button')).map(describe) : [],
+        };
     }
 
     // ===== src/platform/composer.js =====
@@ -501,6 +591,8 @@
 
     // 连续发送失败次数，达到阈值后由 UI 层提示。
     let consecutiveSendFailures = 0;
+    // 上次发送尝试的时间戳，用于冷却。
+    let lastSendAttemptAt = 0;
     const setCurrentConversationKey = (value) => { currentConversationKey = value; };
     const setPromptQueue = (value) => { promptQueue = value; };
     const setMergeMessagesEnabled = (value) => { mergeMessagesEnabled = value; };
@@ -522,6 +614,7 @@
     const setLastRenderedQueueSnapshot = (value) => { lastRenderedQueueSnapshot = value; };
     const setPendingEnterCountFromBottom = (value) => { pendingEnterCountFromBottom = value; };
     const setConsecutiveSendFailures = (value) => { consecutiveSendFailures = value; };
+    const setLastSendAttemptAt = (value) => { lastSendAttemptAt = value; };
 
     // 拖拽中或行内编辑中一律不发送、不重渲染，避免用户操作被打断。
     const isInteracting = () => isDragging || activeEditIndex !== null;
@@ -691,10 +784,14 @@
     }
 
     // ---------- 发送 ----------
-    // 每一步都校验 sendCancellationToken，用户一旦干预即刻放弃本次尝试；
-    // 只有确认真的进入流式输出才出队，确保失败时消息不丢。
+    // 每一步都校验 sendCancellationToken，用户一旦干预即刻放弃本次尝试。
+    // 只有确认「确实发出去了」才出队；失败则撤回注入的文本，不留残渣。
     async function sendNextQueuedPrompt(hooks = {}) {
         if (!promptQueue.length || isStreaming() || isInteracting()) return false;
+
+        // 冷却：无论上次成败，都要间隔足够时间。检测一旦失灵，这是防连发的最后闸门。
+        if (Date.now() - lastSendAttemptAt < sendCooldownMilliseconds) return false;
+        setLastSendAttemptAt(Date.now());
 
         const myAttemptToken = sendCancellationToken;
 
@@ -711,19 +808,24 @@
             transactionWaitMilliseconds
         );
         if (sendCancellationToken !== myAttemptToken) return false;
-        if (!editorAcknowledgedText) return noteSendFailure(hooks);
+        if (!editorAcknowledgedText) return abortAttempt(savedDraftText, hooks);
 
-        const sendButtonEnabled = await waitFor(() => !isStreaming() && isSendEnabled(), sendEnableWaitMilliseconds);
+        const sendButtonEnabled = await waitFor(() => isSendEnabled(), sendEnableWaitMilliseconds);
         if (sendCancellationToken !== myAttemptToken) return false;
-        if (!sendButtonEnabled) return noteSendFailure(hooks);
+        if (!sendButtonEnabled) return abortAttempt(savedDraftText, hooks);
 
+        // 记下点击前输入框里实际渲染出的文本，作为「是否已被 ChatGPT 清空」的对照。
+        const renderedBeforeClick = currentComposerText();
         clickSubmitButtonHuman();
         if (sendCancellationToken !== myAttemptToken) return false;
 
-        // 必须确认进入流式输出，否则视为没发出去，不出队。
-        const streamingStarted = await waitFor(() => isStreaming(), streamingStartWaitMilliseconds);
+        // 发出确认：进入生成态，或者输入框内容已不再是我们注入的那段（官方发送后会清空）。
+        const sendConfirmed = await waitFor(
+            () => isStreaming() || currentComposerText() !== renderedBeforeClick,
+            sendConfirmWaitMilliseconds
+        );
         if (sendCancellationToken !== myAttemptToken) return false;
-        if (!streamingStarted) return noteSendFailure(hooks);
+        if (!sendConfirmed) return abortAttempt(savedDraftText, hooks);
 
         if (savedDraftText) scheduleDraftRestore(savedDraftText, myAttemptToken);
 
@@ -733,9 +835,21 @@
         promptQueue.shift();
         persistCurrentStateIfPossible();
 
+        // 冷却从本次尝试结束时起算；若没观察到生成态，说明检测可能失灵，额外拉长。
+        setLastSendAttemptAt(Date.now() + (isStreaming() ? 0 : unconfirmedStreamingExtraCooldownMilliseconds));
+
         setConsecutiveSendFailures(0);
         hooks.onQueueChanged?.();
         return true;
+    }
+
+    // 发送失败：撤掉注入的队列文本，把用户原本的草稿放回去，避免越积越多。
+    function abortAttempt(savedDraftText, hooks) {
+        if (savedDraftText) setComposerText(savedDraftText);
+        else clearComposer();
+        // 一次失败尝试本身可能耗时数秒，冷却必须从结束时刻起算才有意义。
+        setLastSendAttemptAt(Date.now());
+        return noteSendFailure(hooks);
     }
 
     // 上游此处静默返回，用户不知道队列卡住；这里累计失败并在达阈值时提示。
@@ -796,13 +910,41 @@
         `;
         document.head.appendChild(style);
     }
+
+    // ChatGPT 通过 html.dark / html.light 切换主题，面板配色随之切换。
+    function isDarkTheme() {
+        try {
+            const root = document.documentElement;
+            if (root.classList.contains('dark')) return true;
+            if (root.classList.contains('light')) return false;
+            return matchMedia('(prefers-color-scheme: dark)').matches;
+        } catch {
+            return true;
+        }
+    }
+
+    // 面板挂在 body 上、以 fixed 定位悬浮于输入框上方，与 ChatGPT 的 DOM 树完全脱钩。
+    // left / width / bottom 由 positionQueueHost() 按输入框坐标实时写入。
     function queueHostStyle() {
+        const dark = isDarkTheme();
         return [
+            'position:fixed',
+            'z-index:2147483000',
             'display:flex',
             'flex-direction:column',
-            'gap:8px',
-            `padding-top:${queueHostPaddingTopPixels}px`,
-            'width:100%',
+            'gap:6px',
+            'box-sizing:border-box',
+            `padding:${queueHostPaddingTopPixels}px`,
+            'border-radius:18px',
+            dark ? 'background:rgba(28,28,32,.78)' : 'background:rgba(255,255,255,.82)',
+            dark ? 'border:1px solid rgba(255,255,255,.10)' : 'border:1px solid rgba(0,0,0,.08)',
+            dark ? 'color:#ececec' : 'color:#1f1f1f',
+            'backdrop-filter:blur(14px) saturate(1.2)',
+            '-webkit-backdrop-filter:blur(14px) saturate(1.2)',
+            'box-shadow:0 12px 40px rgba(0,0,0,.28)',
+            'max-height:42vh',
+            'overflow:auto',
+            'pointer-events:auto',
         ].join(';');
     }
     function queueRowWrapperStyle() {
@@ -1212,17 +1354,10 @@
     let renderHooks = {};
     function setRenderHooks(hooks) { renderHooks = hooks || {}; }
     function ensureQueueHost() {
-        const anchor = composerAnchorNode();
-        if (!anchor?.parentElement) return null;
+        if (!composerFormNode()) return null;
 
-        // 面板须紧贴在输入区外框之前；位置不对（如 ChatGPT 重建了 DOM）就重新挂载。
-        const isMountedCorrectly =
-            queueHostNode
-            && queueHostNode.parentElement === anchor.parentElement
-            && queueHostNode.nextElementSibling === anchor;
-
-        if (queueHostNode && !isMountedCorrectly) {
-            queueHostNode.remove();
+        // 面板永远挂在 body 上；被 ChatGPT 的整页重渲染移除时重新创建。
+        if (queueHostNode && !queueHostNode.isConnected) {
             setQueueHostNode(null);
             setHostListenersAttached(false);
         }
@@ -1231,12 +1366,11 @@
             const host = document.createElement('div');
             host.id = queueHostId;
             host.contentEditable = 'false';
+            host.setAttribute('role', 'region');
             host.style.cssText = queueHostStyle();
-            // 作为兄弟节点插在输入区之前，绝不进入其内部。
-            anchor.parentElement.insertBefore(host, anchor);
+            host.style.display = 'none';
+            document.body.appendChild(host);
             setQueueHostNode(host);
-        } else {
-            queueHostNode.style.cssText = queueHostStyle();
         }
 
         if (!hostListenersAttached) {
@@ -1247,6 +1381,33 @@
         }
 
         return queueHostNode;
+    }
+
+    // 按输入框外框的坐标把面板贴在其上方。用 bottom 定位，队列变长时向上生长。
+    function positionQueueHost() {
+        const host = queueHostNode;
+        if (!host || host.style.display === 'none') return;
+
+        const form = composerFormNode();
+        if (!form) { host.style.display = 'none'; return; }
+
+        const rect = form.getBoundingClientRect();
+        if (!rect.width) { host.style.display = 'none'; return; }
+
+        const gapPixels = 8;
+        host.style.left = `${Math.round(rect.left)}px`;
+        host.style.width = `${Math.round(rect.width)}px`;
+        host.style.bottom = `${Math.round(window.innerHeight - rect.top + gapPixels)}px`;
+    }
+
+    function showQueueHost(host) {
+        host.style.cssText = queueHostStyle();
+        host.style.display = 'flex';
+        positionQueueHost();
+    }
+
+    function hideQueueHost(host) {
+        host.style.display = 'none';
     }
 
     // 构建单行。editing 为 true 时该行进入可编辑态。
@@ -1269,6 +1430,12 @@
         itemBox.contentEditable = 'false';
         itemBox.dataset.queueBox = 'true';
         itemBox.style.cssText = queueItemBoxStyle();
+
+        const indexBadge = document.createElement('span');
+        indexBadge.contentEditable = 'false';
+        indexBadge.textContent = `#${index + 1}`;
+        indexBadge.style.cssText = 'flex:0 0 auto;opacity:.55;font-size:12px;line-height:1.4;padding-top:2px;user-select:none;';
+        itemBox.appendChild(indexBadge);
 
         const text = document.createElement('div');
         text.contentEditable = editing ? 'true' : 'false';
@@ -1369,7 +1536,8 @@
         setLastRenderedQueueSnapshot(promptQueue.slice());
 
         host.innerHTML = '';
-        if (promptQueue.length === 0) return;
+        if (promptQueue.length === 0) { hideQueueHost(host); return; }
+        showQueueHost(host);
 
         for (let index = 0; index < promptQueue.length; index++) {
             const { rowWrapper } = buildQueueRow(index, { editing: false, anyEditing: false });
@@ -1399,6 +1567,7 @@
         setActiveEditOriginalText(promptQueue[index]);
 
         host.innerHTML = '';
+        showQueueHost(host);
 
         let editingTextNode = null;
         for (let i = 0; i < promptQueue.length; i++) {
@@ -1556,22 +1725,33 @@
         composer.addEventListener('keydown', onComposerKeydownCapture, true);
     }
 
-    // 盯住发送按钮状态：从 stop-button 变回 send-button 即代表生成结束，可以发下一条。
+    // 新版 ChatGPT 的发送 / 停止按钮可能是两个元素互相替换，而非同一按钮改属性，
+    // 因此改为观察整个输入区子树，任何变化都重新评估是否可以发下一条。
+    let observerEvaluationScheduled = false;
     function attachSubmitButtonObserver() {
-        const button = submitButtonNode();
-        if (!button || button === attachedSubmitButtonNode) return;
+        const form = composerFormNode();
+        if (!form || form === attachedSubmitButtonNode) return;
 
-        setAttachedSubmitButtonNode(button);
+        setAttachedSubmitButtonNode(form);
 
         submitButtonMutationObserver?.disconnect();
         const observer = new MutationObserver(() => {
-            if (!isStreaming() && promptQueue.length && !isInteracting()) pump();
-            if (pendingDraftRestore) tryRestorePendingDraft();
+            // 合并同一帧内的多次变动，避免高频触发。
+            if (observerEvaluationScheduled) return;
+            observerEvaluationScheduled = true;
+            requestAnimationFrame(() => {
+                observerEvaluationScheduled = false;
+                if (!isStreaming() && promptQueue.length && !isInteracting()) pump();
+                if (pendingDraftRestore) tryRestorePendingDraft();
+                positionQueueHost();
+            });
         });
 
-        observer.observe(button, {
+        observer.observe(form, {
+            childList: true,
+            subtree: true,
             attributes: true,
-            attributeFilter: ['data-testid', 'disabled', 'aria-disabled', 'aria-label'],
+            attributeFilter: ['data-testid', 'disabled', 'aria-disabled', 'aria-label', 'class'],
         });
         setSubmitButtonMutationObserver(observer);
     }
@@ -1641,10 +1821,18 @@
         attachSubmitButtonObserver();
 
         if (!isDragging) renderQueue();
+        positionQueueHost();
 
         if (pendingDraftRestore) tryRestorePendingDraft();
         if (promptQueue.length && !isStreaming() && !isInteracting()) pump();
     }
+
+    // 视口或布局变化时重新贴合输入框。
+    window.addEventListener('resize', positionQueueHost, true);
+    window.addEventListener('scroll', positionQueueHost, true);
+
+    // 控制台诊断入口：页面改版时让用户一键导出关键节点信息。
+    try { window.__cmqDiag = () => collectDiagnostics(); } catch { }
 
     // ---------- 启动 ----------
     ensureAnimationStyles();
