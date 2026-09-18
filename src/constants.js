@@ -18,6 +18,10 @@ export const draftRestoreRetryDelays = [0, 40, 120, 260, 420, 700, 1100, 1600, 2
 // 连续发送失败到达该次数后，向用户显示可见告警。
 export const sendFailureNoticeThreshold = 3;
 
+// 连续多少轮找不到输入框才判定为页面改版。
+// ChatGPT 前端渲染较慢，启动初期找不到属正常现象，不能立刻报错。
+export const composerMissNoticeThreshold = 8;
+
 // ---------- 布局 ----------
 export const queueHostPaddingTopPixels = 10;
 export const dragHandleWidthPixels = 44;

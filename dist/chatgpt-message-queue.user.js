@@ -42,6 +42,10 @@
     // 连续发送失败到达该次数后，向用户显示可见告警。
     const sendFailureNoticeThreshold = 3;
 
+    // 连续多少轮找不到输入框才判定为页面改版。
+    // ChatGPT 前端渲染较慢，启动初期找不到属正常现象，不能立刻报错。
+    const composerMissNoticeThreshold = 8;
+
     // ---------- 布局 ----------
     const queueHostPaddingTopPixels = 10;
     const dragHandleWidthPixels = 44;
@@ -152,13 +156,21 @@
         return null;
     }
 
+    // 由精确到宽松排列，逐级降级。前几条对应已知的 ChatGPT 结构，
+    // 后几条是页面改版后的兜底，尽量只靠通用特征而非哈希类名。
     const composerSelectors = [
         'div#prompt-textarea.ProseMirror[contenteditable="true"]',
         'div#prompt-textarea[contenteditable="true"]',
-        '[data-testid="prompt-textarea"][contenteditable="true"]',
+        '#prompt-textarea',
+        '[data-testid="prompt-textarea"]',
+        '[data-virtualkeyboard="true"][contenteditable="true"]',
         'form [contenteditable="true"].ProseMirror',
         'main [contenteditable="true"].ProseMirror',
+        '[contenteditable="true"].ProseMirror',
+        'form [contenteditable="true"]',
         'div[contenteditable="true"][translate="no"]',
+        // 只匹配 contenteditable：文本读写依赖 innerText 与 ProseMirror 注入，
+        // 匹配到 textarea 会得到一个读不出也写不进的节点，比直接报错更糟。
     ];
 
     const submitButtonSelectors = [
@@ -225,6 +237,11 @@
         if (selectorFailureReported) return;
         selectorFailureReported = true;
         onFailure?.();
+    }
+
+    // 输入框恢复后重置，使后续真正的改版失效仍能被提示。
+    function resetSelectorFailureReport() {
+        selectorFailureReported = false;
     }
     function hasComposer() {
         return Boolean(composerNode());
@@ -1579,15 +1596,28 @@
     }, true);
 
     // ---------- 主循环 ----------
+    let consecutiveComposerMisses = 0;
+
     function tick() {
         notifyUrlChange();
 
-        // composer 找不到通常意味着页面改版，提示一次而非静默失效。
+        // ChatGPT 是前端渲染的，脚本启动时输入框往往尚未出现；
+        // 只有连续多轮都找不到才判定为页面改版，避免刚进页面就误报。
         if (!composerNode()) {
-            reportSelectorFailureOnce(() => {
-                showNoticeOnce(document.body, 'selector-failure', 'selectorFailureTitle', 'selectorFailureBody');
-            });
+            consecutiveComposerMisses++;
+            if (consecutiveComposerMisses >= composerMissNoticeThreshold) {
+                reportSelectorFailureOnce(() => {
+                    showNoticeOnce(document.body, 'selector-failure', 'selectorFailureTitle', 'selectorFailureBody');
+                });
+            }
             return;
+        }
+
+        // 输入框回来了：撤掉告警并重置上报标记，以便后续真正失效时仍能提示。
+        if (consecutiveComposerMisses) {
+            consecutiveComposerMisses = 0;
+            resetSelectorFailureReport();
+            clearNotice(document.body);
         }
 
         ensureQueueHost();

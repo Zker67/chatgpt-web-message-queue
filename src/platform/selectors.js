@@ -15,13 +15,21 @@ function querySelectorChain(selectorList, root = document) {
     return null;
 }
 
+// 由精确到宽松排列，逐级降级。前几条对应已知的 ChatGPT 结构，
+// 后几条是页面改版后的兜底，尽量只靠通用特征而非哈希类名。
 const composerSelectors = [
     'div#prompt-textarea.ProseMirror[contenteditable="true"]',
     'div#prompt-textarea[contenteditable="true"]',
-    '[data-testid="prompt-textarea"][contenteditable="true"]',
+    '#prompt-textarea',
+    '[data-testid="prompt-textarea"]',
+    '[data-virtualkeyboard="true"][contenteditable="true"]',
     'form [contenteditable="true"].ProseMirror',
     'main [contenteditable="true"].ProseMirror',
+    '[contenteditable="true"].ProseMirror',
+    'form [contenteditable="true"]',
     'div[contenteditable="true"][translate="no"]',
+    // 只匹配 contenteditable：文本读写依赖 innerText 与 ProseMirror 注入，
+    // 匹配到 textarea 会得到一个读不出也写不进的节点，比直接报错更糟。
 ];
 
 const submitButtonSelectors = [
@@ -94,6 +102,11 @@ export function reportSelectorFailureOnce(onFailure) {
     if (selectorFailureReported) return;
     selectorFailureReported = true;
     onFailure?.();
+}
+
+// 输入框恢复后重置，使后续真正的改版失效仍能被提示。
+export function resetSelectorFailureReport() {
+    selectorFailureReported = false;
 }
 
 export function hasComposer() {

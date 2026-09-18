@@ -1,5 +1,5 @@
-import { pollIntervalMilliseconds, exitSendAnimationMilliseconds } from './constants.js';
-import { composerNode, submitButtonNode, isStreaming, isSendEnabled, reportSelectorFailureOnce } from './platform/selectors.js';
+import { pollIntervalMilliseconds, exitSendAnimationMilliseconds, composerMissNoticeThreshold } from './constants.js';
+import { composerNode, submitButtonNode, isStreaming, isSendEnabled, reportSelectorFailureOnce, resetSelectorFailureReport } from './platform/selectors.js';
 import { currentComposerText, clearComposer, clickSubmitButtonHuman, sleep } from './platform/composer.js';
 import {
     promptQueue,
@@ -15,7 +15,7 @@ import { switchConversationIfNeeded, enqueuePrompt, persistCurrentStateIfPossibl
 import { pumpQueue, tryRestorePendingDraft } from './core/sender.js';
 import { ensureAnimationStyles } from './ui/styles.js';
 import { ensureQueueHost, renderQueue, renderQueueHard, setRenderHooks } from './ui/render.js';
-import { showNoticeOnce } from './ui/notice.js';
+import { showNoticeOnce, clearNotice } from './ui/notice.js';
 import { normalizeText } from './platform/composer.js';
 
 // 出队前播放送出动画，让用户看清是哪条被发走了。
@@ -162,15 +162,28 @@ document.addEventListener('visibilitychange', () => {
 }, true);
 
 // ---------- 主循环 ----------
+let consecutiveComposerMisses = 0;
+
 function tick() {
     notifyUrlChange();
 
-    // composer 找不到通常意味着页面改版，提示一次而非静默失效。
+    // ChatGPT 是前端渲染的，脚本启动时输入框往往尚未出现；
+    // 只有连续多轮都找不到才判定为页面改版，避免刚进页面就误报。
     if (!composerNode()) {
-        reportSelectorFailureOnce(() => {
-            showNoticeOnce(document.body, 'selector-failure', 'selectorFailureTitle', 'selectorFailureBody');
-        });
+        consecutiveComposerMisses++;
+        if (consecutiveComposerMisses >= composerMissNoticeThreshold) {
+            reportSelectorFailureOnce(() => {
+                showNoticeOnce(document.body, 'selector-failure', 'selectorFailureTitle', 'selectorFailureBody');
+            });
+        }
         return;
+    }
+
+    // 输入框回来了：撤掉告警并重置上报标记，以便后续真正失效时仍能提示。
+    if (consecutiveComposerMisses) {
+        consecutiveComposerMisses = 0;
+        resetSelectorFailureReport();
+        clearNotice(document.body);
     }
 
     ensureQueueHost();
