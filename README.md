@@ -28,8 +28,9 @@ Enter，消息进入输入框上方的队列；ChatGPT 一答完，队列里的�
 
 | 按键 | 行为 |
 |---|---|
-| `Enter` | 消息进入队列（空闲时队列立即发出，效果与直接发送一致） |
-| `Ctrl+Enter` / `Cmd+Enter` | 绕过队列，走 ChatGPT 官方直接发送 |
+| `Enter`（生成中） | 消息进入队列，等 ChatGPT 答完自动发出 |
+| `Enter`（空闲时） | ChatGPT 原生发送，脚本不介入 |
+| `Ctrl+Enter` / `Cmd+Enter` | 直接发送，绕过队列；生成中也可强制发出 |
 | `Shift+Enter` | 换行 |
 
 > 本项目接手自 [maribox](https://github.com/maribox/my_userscripts) 的
@@ -46,8 +47,8 @@ Enter，消息进入输入框上方的队列；ChatGPT 一答完，队列里的�
 
 | 功能 | 说明 |
 |---|---|
-| Enter 入队 | 按 Enter 一律进入队列；生成中也不会被丢弃 |
-| 官方直发保留 | `Ctrl+Enter` / `Cmd+Enter` 绕过队列直接发送 |
+| 生成中入队 | 流式输出时按 Enter，消息进入队列而非被丢弃 |
+| 强制直发 | `Ctrl+Enter` / `Cmd+Enter` 绕过队列直接发送，生成中同样有效 |
 | 自动发送 | 检测到生成结束，自动发出队首消息 |
 | 拖拽排序 | 拖左侧手柄调整顺序，带插入位置指示线 |
 | 编辑 / 删除 | 行内编辑（Enter 保存、Shift+Enter 换行、Esc 取消） |

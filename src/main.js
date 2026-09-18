@@ -1,6 +1,6 @@
 import { pollIntervalMilliseconds, exitSendAnimationMilliseconds } from './constants.js';
-import { composerNode, submitButtonNode, isStreaming, reportSelectorFailureOnce } from './platform/selectors.js';
-import { currentComposerText, clearComposer, sleep } from './platform/composer.js';
+import { composerNode, submitButtonNode, isStreaming, isSendEnabled, reportSelectorFailureOnce } from './platform/selectors.js';
+import { currentComposerText, clearComposer, clickSubmitButtonHuman, sleep } from './platform/composer.js';
 import {
     promptQueue,
     attachedComposerNode, setAttachedComposerNode,
@@ -55,33 +55,40 @@ function pump() {
 }
 
 // ---------- 劫持 Enter ----------
-// Enter 一律入队（空闲时由队列立刻发出，效果与直发一致）；
-// Ctrl/Cmd+Enter 放行给官方直发，作为绕过队列的逃生口；
-// Shift+Enter 保持换行。
+// Enter：生成中入队，空闲时不拦截、走官方发送；
+// Ctrl/Cmd+Enter：等同官方 Enter，任何时候都直发，生成中亦然（绕过队列）；
+// Shift+Enter：换行。
 function onComposerKeydownCapture(event) {
     if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.isComposing) return;
-    // 带 Ctrl/Cmd 时不拦截，交给 ChatGPT 自己处理。
-    if (event.ctrlKey || event.metaKey) return;
 
     const composer = composerNode();
     if (!composer || document.activeElement !== composer) return;
+
+    // Ctrl/Cmd+Enter：绕过队列直接发送。生成中官方会忽略按键，
+    // 因此由脚本显式点发送按钮，而不是放行给页面。
+    if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        event.stopImmediatePropagation?.();
+        event.stopPropagation();
+
+        if (currentComposerText() && isSendEnabled()) clickSubmitButtonHuman();
+        return;
+    }
+
+    // 空闲时不拦截，保持 ChatGPT 原生的发送行为。
+    if (!isStreaming()) return;
 
     event.preventDefault();
     event.stopImmediatePropagation?.();
     event.stopPropagation();
 
     const text = currentComposerText();
-    // 即使没有可入队的文本也要清一次，抹掉 ProseMirror 可能残留的空白节点。
     if (text) {
         enqueuePrompt(text);
         renderQueueHard();
     }
+    // 即使没有可入队的文本也清一次，抹掉 ProseMirror 可能残留的空白节点。
     clearComposer();
-    if (!text) return;
-
-    // 空闲时立即发出，避免等到下一次轮询才发送、显得慢半拍；
-    // 生成中则由发送按钮的状态变化触发。
-    if (!isStreaming()) pump();
 }
 
 function attachComposerListeners() {

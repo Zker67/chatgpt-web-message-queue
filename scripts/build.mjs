@@ -44,8 +44,8 @@ const buildBanner = (version) => `// ==UserScript==
 // @name:zh-CN   ChatGPT 消息队列（续维护版）
 // @namespace    https://github.com/Zker67/chatgpt-web-message-queue
 // @version      ${version}
-// @description  Enter queues your prompt, auto-sent as soon as ChatGPT is ready; Ctrl+Enter still sends directly. Drag to reorder, edit/delete, merge and per-conversation persistence. Bilingual UI.
-// @description:zh-CN  Enter 把消息送入队列，ChatGPT 一答完就自动发出；Ctrl+Enter 仍走官方直接发送。支持拖拽排序、编辑删除、合并发送与按会话持久化，中英双语界面。
+// @description  Press Enter while ChatGPT is generating to queue your prompt, auto-sent as soon as it is ready; Ctrl+Enter always sends directly. Drag to reorder, edit/delete, merge and per-conversation persistence. Bilingual UI.
+// @description:zh-CN  ChatGPT 生成中按 Enter 把消息送入队列，答完自动发出；Ctrl+Enter 始终直接发送。支持拖拽排序、编辑删除、合并发送与按会话持久化，中英双语界面。
 // @author       zker67
 // @license      MIT
 // @match        https://chatgpt.com/*
