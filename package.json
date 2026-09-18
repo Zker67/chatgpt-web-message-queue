@@ -1,0 +1,20 @@
+{
+  "name": "chatgpt-web-message-queue",
+  "private": true,
+  "version": "1.1.0",
+  "description": "Queue prompts while ChatGPT is generating, then auto-send when it is ready. Bilingual, modular fork of maribox's ChatGPT Message Queue.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/logic-test.mjs",
+    "check": "npm run build && node --check dist/chatgpt-message-queue.user.js && npm test"
+  },
+  "keywords": [
+    "chatgpt",
+    "userscript",
+    "tampermonkey",
+    "queue",
+    "prompt-queue"
+  ],
+  "license": "MIT"
+}
