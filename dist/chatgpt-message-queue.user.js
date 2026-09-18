@@ -3,8 +3,8 @@
 // @name:zh-CN   ChatGPT 消息队列（续维护版）
 // @namespace    https://github.com/Zker67/chatgpt-web-message-queue
 // @version      1.1.0
-// @description  Press Enter while ChatGPT is generating to queue your prompt, auto-sent as soon as it is ready; Ctrl+Enter always sends directly. Drag to reorder, edit/delete, merge and per-conversation persistence. Bilingual UI.
-// @description:zh-CN  ChatGPT 生成中按 Enter 把消息送入队列，答完自动发出；Ctrl+Enter 始终直接发送。支持拖拽排序、编辑删除、合并发送与按会话持久化，中英双语界面。
+// @description  Press Enter while ChatGPT is generating to queue your prompt, auto-sent as soon as it is ready. Drag to reorder, edit/delete, merge and per-conversation persistence. Bilingual UI.
+// @description:zh-CN  ChatGPT 生成中按 Enter 把消息送入队列，答完自动发出。支持拖拽排序、编辑删除、合并发送与按会话持久化，中英双语界面。
 // @author       zker67
 // @license      MIT
 // @match        https://chatgpt.com/*
@@ -1490,24 +1490,15 @@
 
     // ---------- 劫持 Enter ----------
     // Enter：生成中入队，空闲时不拦截、走官方发送；
-    // Ctrl/Cmd+Enter：等同官方 Enter，任何时候都直发，生成中亦然（绕过队列）；
+    // Ctrl/Cmd+Enter：完全不拦截，原样交给 ChatGPT 处理；
     // Shift+Enter：换行。
     function onComposerKeydownCapture(event) {
         if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.isComposing) return;
+        // 带 Ctrl/Cmd 时一律放行，交给 ChatGPT 自己处理。
+        if (event.ctrlKey || event.metaKey) return;
 
         const composer = composerNode();
         if (!composer || document.activeElement !== composer) return;
-
-        // Ctrl/Cmd+Enter：绕过队列直接发送。生成中官方会忽略按键，
-        // 因此由脚本显式点发送按钮，而不是放行给页面。
-        if (event.ctrlKey || event.metaKey) {
-            event.preventDefault();
-            event.stopImmediatePropagation?.();
-            event.stopPropagation();
-
-            if (currentComposerText() && isSendEnabled()) clickSubmitButtonHuman();
-            return;
-        }
 
         // 空闲时不拦截，保持 ChatGPT 原生的发送行为。
         if (!isStreaming()) return;
