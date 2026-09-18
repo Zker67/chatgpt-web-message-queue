@@ -1,5 +1,5 @@
 import { queueHostId, exitDeleteAnimationMilliseconds } from '../constants.js';
-import { composerNode, composerContainerNode } from '../platform/selectors.js';
+import { composerAnchorNode } from '../platform/selectors.js';
 import {
     queueHostNode, setQueueHostNode,
     hostListenersAttached, setHostListenersAttached,
@@ -22,12 +22,16 @@ let renderHooks = {};
 export function setRenderHooks(hooks) { renderHooks = hooks || {}; }
 
 export function ensureQueueHost() {
-    const container = composerContainerNode();
-    const composer = composerNode();
-    if (!container || !composer) return null;
+    const anchor = composerAnchorNode();
+    if (!anchor?.parentElement) return null;
 
-    // 容器被 ChatGPT 重建过：丢弃旧宿主，重新挂载。
-    if (queueHostNode && queueHostNode.parentElement !== container) {
+    // 面板须紧贴在输入区外框之前；位置不对（如 ChatGPT 重建了 DOM）就重新挂载。
+    const isMountedCorrectly =
+        queueHostNode
+        && queueHostNode.parentElement === anchor.parentElement
+        && queueHostNode.nextElementSibling === anchor;
+
+    if (queueHostNode && !isMountedCorrectly) {
         queueHostNode.remove();
         setQueueHostNode(null);
         setHostListenersAttached(false);
@@ -38,7 +42,8 @@ export function ensureQueueHost() {
         host.id = queueHostId;
         host.contentEditable = 'false';
         host.style.cssText = queueHostStyle();
-        container.insertBefore(host, composer);
+        // 作为兄弟节点插在输入区之前，绝不进入其内部。
+        anchor.parentElement.insertBefore(host, anchor);
         setQueueHostNode(host);
     } else {
         queueHostNode.style.cssText = queueHostStyle();

@@ -180,10 +180,12 @@
         'form button[type="submit"]',
     ];
 
-    // 容器用于挂载队列面板，找不到时由调用方回退到 composer 的父节点。
-    const composerContainerSelectors = [
-        '[class*="prosemirror-parent"]',
-        'form [class*="composer"]',
+    // 队列面板的锚点：整个输入区外框。面板会作为它的前置兄弟节点插入，
+    // 绝不能落进可编辑子树里，否则 ChatGPT 会把面板文字当成输入内容一起发出。
+    const composerFormSelectors = [
+        'form[data-type="unified-composer"]',
+        'main form',
+        'form',
     ];
     function composerNode() {
         return querySelectorChain(composerSelectors);
@@ -191,18 +193,36 @@
     function submitButtonNode() {
         return querySelectorChain(submitButtonSelectors);
     }
-    function composerContainerNode() {
+
+    // 返回队列面板的锚点元素；面板将插入到它前面，成为其兄弟节点。
+    function composerAnchorNode() {
         const composer = composerNode();
         if (!composer) return null;
 
-        // 优先向上找已知容器，失败则退回直接父节点，保证面板总有落点。
-        for (const selector of composerContainerSelectors) {
+        for (const selector of composerFormSelectors) {
             try {
                 const found = composer.closest(selector);
-                if (found) return found;
+                // 锚点必须有父节点，才能在其之前插入兄弟节点。
+                if (found?.parentElement) return found;
             } catch { }
         }
-        return composer.parentElement || null;
+
+        // 兜底：面板会插到锚点之前，即落在「锚点的父节点」里，
+        // 因此要一直上溯到父节点不再属于任何可编辑区域为止。
+        let node = composer;
+        while (node.parentElement && isInsideEditable(node.parentElement)) {
+            node = node.parentElement;
+        }
+        return node.parentElement ? node : null;
+    }
+
+    // 元素自身或其祖先是否处于 contenteditable 区域内。
+    function isInsideEditable(element) {
+        try {
+            return Boolean(element.closest?.('[contenteditable="true"]'));
+        } catch {
+            return false;
+        }
     }
     function submitButtonMode() {
         const button = submitButtonNode();
@@ -1192,12 +1212,16 @@
     let renderHooks = {};
     function setRenderHooks(hooks) { renderHooks = hooks || {}; }
     function ensureQueueHost() {
-        const container = composerContainerNode();
-        const composer = composerNode();
-        if (!container || !composer) return null;
+        const anchor = composerAnchorNode();
+        if (!anchor?.parentElement) return null;
 
-        // 容器被 ChatGPT 重建过：丢弃旧宿主，重新挂载。
-        if (queueHostNode && queueHostNode.parentElement !== container) {
+        // 面板须紧贴在输入区外框之前；位置不对（如 ChatGPT 重建了 DOM）就重新挂载。
+        const isMountedCorrectly =
+            queueHostNode
+            && queueHostNode.parentElement === anchor.parentElement
+            && queueHostNode.nextElementSibling === anchor;
+
+        if (queueHostNode && !isMountedCorrectly) {
             queueHostNode.remove();
             setQueueHostNode(null);
             setHostListenersAttached(false);
@@ -1208,7 +1232,8 @@
             host.id = queueHostId;
             host.contentEditable = 'false';
             host.style.cssText = queueHostStyle();
-            container.insertBefore(host, composer);
+            // 作为兄弟节点插在输入区之前，绝不进入其内部。
+            anchor.parentElement.insertBefore(host, anchor);
             setQueueHostNode(host);
         } else {
             queueHostNode.style.cssText = queueHostStyle();
