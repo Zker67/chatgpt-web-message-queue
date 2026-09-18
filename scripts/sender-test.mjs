@@ -50,7 +50,8 @@ function makeHarness(queue, behaviour) {
         };
         const normalizeText = (t) => String(t || '').trim();
         const currentComposerText = () => normalizeText(__w.composerText);
-        const setComposerText = (t) => { __w.composerText = t; __w.log.push('注入:' + t); };
+        const setComposerText = (t) => { __w.composerText = t; __w.log.push('注入:' + t); return true; };
+        const textMatches = (a, b) => String(a || '').replace(/\s+/g, '') === String(b || '').replace(/\s+/g, '');
         const appendComposerText = (t) => { __w.composerText += t; __w.log.push('追加:' + t); };
         const clearComposer = () => { __w.composerText = ''; __w.log.push('清空'); };
         const clickSubmitButtonHuman = () => { __w.clicks++; __w.log.push('点击发送'); __w.onClick?.(); return true; };
@@ -181,6 +182,61 @@ console.log('\n[6] isStreaming 在中文 aria-label 下的判定');
 
     const voiceOnly = runWith([makeButton({ 'aria-label': '开始语音模式' })]);
     check('只有语音按钮 → 不误判为生成中', voiceOnly.isStreaming === false, JSON.stringify(voiceOnly));
+}
+
+console.log('\n[7] 生成态判定：新版无停止按钮，改看对话状态');
+{
+    const selectorsSource = loadModule('src/platform/selectors.js');
+    const el = (attrs = {}, { text = '', children = [] } = {}) => ({
+        tagName: 'DIV', isConnected: true, disabled: false, className: '',
+        getAttribute: (k) => attrs[k] ?? null,
+        get innerText() { return text; },
+        querySelector: (selector) => children.find((child) => child.__matches?.(selector)) || null,
+        querySelectorAll: () => [],
+        closest: () => null,
+        getBoundingClientRect: () => ({ width: 30, height: 30 }),
+    });
+    const actionButton = () => Object.assign(el({ 'data-testid': 'copy-turn-action-button' }), {
+        __matches: (selector) => selector.includes('copy-turn-action-button'),
+    });
+
+    function assess(turns, { mutatedAgoMs = null } = {}) {
+        const sendButton = el({ 'aria-label': '发送提示' });
+        const form = { querySelectorAll: () => [sendButton], querySelector: () => null };
+        const composer = { closest: () => form, parentElement: null };
+        const doc = {
+            querySelector: (selector) => selector.includes('#prompt-textarea') ? composer : null,
+            querySelectorAll: (selector) => selector.includes('data-message-author-role') ? turns.map((turn) => turn.node) : [],
+        };
+        const body = selectorsSource + '\n' +
+            (mutatedAgoMs === null ? '' : 'lastConversationMutationAt = Date.now() - ' + mutatedAgoMs + ';\n') +
+            'return streamingAssessment();';
+        return new Function('document', 'getComputedStyle', body)(doc, () => ({ display: 'block', visibility: 'visible', pointerEvents: 'auto' }));
+    }
+    const turn = (role, text, withActions) => ({
+        node: el({ 'data-message-author-role': role }, { text, children: withActions ? [actionButton()] : [] }),
+    });
+
+    let a = assess([]);
+    check('空对话 → 空闲', a.streaming === false, a.reason);
+
+    a = assess([turn('user', '问题', false)]);
+    check('最后一条是用户消息（已提问未答）→ 生成中', a.streaming === true && a.reason === 'awaiting-assistant', a.reason);
+
+    a = assess([turn('user', '问题', false), turn('assistant', '正在思考', false)]);
+    check('助手轮显示「正在思考」→ 生成中', a.streaming === true && a.reason === 'thinking-indicator', a.reason);
+
+    a = assess([turn('user', '问题', false), turn('assistant', '回答内容很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长', false)], { mutatedAgoMs: 500 });
+    check('助手输出中（无操作栏 + 刚有变动）→ 生成中', a.streaming === true && a.reason === 'assistant-unfinished', a.reason);
+
+    a = assess([turn('user', '问题', false), turn('assistant', '完整回答', true)], { mutatedAgoMs: 8000 });
+    check('助手已完成（有操作栏 + 已静止）→ 空闲', a.streaming === false, a.reason);
+
+    a = assess([turn('user', '问题', false), turn('assistant', '完整回答', false)], { mutatedAgoMs: 20000 });
+    check('无操作栏但静止 20 秒 → 视为完成，防卡死', a.streaming === false && a.reason === 'assistant-settled-without-actions', a.reason);
+
+    a = assess([turn('user', '问题', false), turn('assistant', '完整回答', true)], { mutatedAgoMs: 800 });
+    check('有操作栏但对话区仍在变动 → 生成中（收尾阶段）', a.streaming === true && a.reason === 'conversation-mutating', a.reason);
 }
 
 console.log(`\n结果：${passCount} 通过, ${failCount} 失败`);

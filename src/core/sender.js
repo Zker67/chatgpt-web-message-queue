@@ -11,6 +11,7 @@ import { isStreaming, isSendEnabled, composerNode } from '../platform/selectors.
 import {
     waitFor,
     normalizeText,
+    textMatches,
     currentComposerText,
     setComposerText,
     appendComposerText,
@@ -19,7 +20,6 @@ import {
 } from '../platform/composer.js';
 import {
     promptQueue,
-    proseMirrorTransactionCounter,
     sendCancellationToken,
     isQueuePumpRunning, setIsQueuePumpRunning,
     pendingDraftRestore, setPendingDraftRestore,
@@ -101,14 +101,14 @@ export async function sendNextQueuedPrompt(hooks = {}) {
 
     const savedDraftText = currentComposerText();
     const nextQueuedPromptText = promptQueue[0];
-    const baselineTransactionCount = proseMirrorTransactionCounter;
 
-    setComposerText(nextQueuedPromptText);
+    // 注入失败（多半是清空不了输入框）直接放弃，绝不把队列文本插进残留内容里。
+    if (!setComposerText(nextQueuedPromptText)) return abortAttempt(savedDraftText, hooks);
 
-    // 等 ProseMirror 确认收到文本：优先看 transaction 计数，其次比对文本。
+    // 等编辑器内容与目标一致（忽略空白差异），不再以 transaction 计数作捷径——
+    // 计数变了只说明有编辑发生，不代表内容正确。
     const editorAcknowledgedText = await waitFor(
-        () => proseMirrorTransactionCounter > baselineTransactionCount
-            || currentComposerText() === normalizeText(nextQueuedPromptText),
+        () => textMatches(currentComposerText(), nextQueuedPromptText),
         transactionWaitMilliseconds
     );
     if (sendCancellationToken !== myAttemptToken) return false;

@@ -36,19 +36,51 @@ function fireInputEvents(composer) {
     try { composer.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch { }
 }
 
+// 忽略所有空白后比较，ProseMirror 会把段落 / 空行规范化，逐字比对会误判。
+export function textMatches(actual, expected) {
+    const compact = (value) => String(value || '').replace(/\s+/g, '');
+    return compact(actual) === compact(expected);
+}
+
+function isComposerEmpty(composer) {
+    return !normalizeText(composer.innerText || '');
+}
+
+// 用 Range API 选中编辑器全部内容。比 execCommand('selectAll') 可靠：
+// 后者在焦点没落进编辑器时会选中整页，删除自然无效，残留内容就会被后续注入插到中间。
+function selectAllInComposer(composer) {
+    try {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(composer);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// 三级清空，每级都校验是否真的空了；返回是否成功。
 export function clearComposer() {
     const composer = composerNode();
-    if (!composer) return;
+    if (!composer) return false;
     composer.focus();
+    if (isComposerEmpty(composer)) return true;
 
+    selectAllInComposer(composer);
+    try { document.execCommand('delete', false, null); } catch { }
+    if (isComposerEmpty(composer)) { fireInputEvents(composer); return true; }
+
+    selectAllInComposer(composer);
     try {
-        document.execCommand('selectAll', false, null);
-        document.execCommand('delete', false, null);
-    } catch {
-        composer.textContent = '';
-    }
+        composer.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward' }));
+    } catch { }
+    if (isComposerEmpty(composer)) { fireInputEvents(composer); return true; }
 
+    composer.textContent = '';
     fireInputEvents(composer);
+    return isComposerEmpty(composer);
 }
 
 // ProseMirror 不接受直接改 DOM，构造 paste 事件是最贴近真实输入的注入方式。
@@ -75,24 +107,26 @@ function pasteIntoComposer(text) {
 }
 
 // 三级回退：paste 事件 → execCommand('insertText') → 直接写 textContent。
+// 每一级之后都校验内容是否与目标一致；清空失败则直接放弃，绝不往残留内容里插字。
 export function setComposerText(text) {
     const composer = composerNode();
     if (!composer) return false;
 
     composer.focus();
-    clearComposer();
+    if (!clearComposer()) return false;
 
-    if (pasteIntoComposer(text)) {
-        // 宽松校验：ProseMirror 可能对空白做规范化，不要求完全相等。
-        if (normalizeText(composer.innerText || '').length >= normalizeText(text).length * 0.7) return true;
-    }
+    if (pasteIntoComposer(text) && textMatches(composer.innerText, text)) return true;
 
+    // paste 没生效或内容不对：重新清空再试 insertText。
+    if (!clearComposer()) return false;
     let inserted = false;
     try { inserted = document.execCommand('insertText', false, text); } catch { inserted = false; }
-    if (!inserted) composer.textContent = text;
+    if (inserted && textMatches(composer.innerText, text)) { fireInputEvents(composer); return true; }
 
+    if (!clearComposer()) return false;
+    composer.textContent = text;
     fireInputEvents(composer);
-    return true;
+    return textMatches(composer.innerText, text);
 }
 
 function moveCaretToEndOfComposer(composer) {

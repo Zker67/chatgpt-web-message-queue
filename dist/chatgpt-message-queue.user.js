@@ -298,14 +298,109 @@
         return null;
     }
 
-    // 多信号综合判定是否正在生成：任何一个信号为真即视为生成中。
-    function isStreaming() {
-        if (stopButtonNode()) return true;
-        if (submitButtonMode() === 'stop-button') return true;
-        try {
-            if (document.querySelector('.result-streaming, [data-is-streaming="true"], [data-message-streaming="true"]')) return true;
-        } catch { }
+    // ---------- 生成态判定 ----------
+    // 新版 ChatGPT 允许生成中直接发送，生成期间右下角仍是发送箭头、没有停止按钮，
+    // 所以不能再靠按钮判定，而要看对话本身的状态：
+    //   · 最后一条是用户消息 → 已提问、尚未开始回答
+    //   · 最后一条是助手消息但还没出现「复制 / 点赞」操作栏 → 回答尚未完成
+    //   · 存在「正在思考」类指示 → 推理阶段（此时 DOM 可能长时间静止）
+    //   · 对话区最近仍在持续变动 → 正在流式输出
+    // 任一信号为真即视为生成中；宁可多等，不可误发。
+
+    const thinkingTextPattern = /^(正在思考|思考中|正在推理|推理中|正在搜索|搜索中|正在生成|Thinking|Reasoning|Searching|Working)/i;
+
+    const turnActionSelectors = [
+        '[data-testid="copy-turn-action-button"]',
+        '[data-testid*="turn-action"]',
+        '[data-testid*="good-response"]',
+        'button[aria-label*="复制"]',
+        'button[aria-label*="Copy"]',
+        'button[aria-label*="回复"]',
+        'button[aria-label*="response"]',
+    ];
+
+    const streamingHintSelectors = [
+        '.result-streaming',
+        '.result-thinking',
+        '[data-is-streaming="true"]',
+        '[data-message-streaming="true"]',
+        'main [class*="shimmer"]',
+        'main [class*="thinking"]',
+        'main [class*="streaming"]',
+    ];
+
+    // 对话区最近一次内容变动的时间，由 main.js 的 MutationObserver 写入。
+    let lastConversationMutationAt = 0;
+    function noteConversationMutation() {
+        lastConversationMutationAt = Date.now();
+    }
+    // 流式输出会持续改动 DOM；这段时间内没有改动才认为它停了。
+    const conversationQuietMilliseconds = 2500;
+    // 助手消息既无操作栏、又无思考指示、且静止超过此时长，视为已完成（防止操作栏选择器失效导致永远"生成中"）。
+    const assistantSettleMilliseconds = 10000;
+
+    function recentConversationMutationWithin(milliseconds) {
+        return lastConversationMutationAt > 0 && Date.now() - lastConversationMutationAt < milliseconds;
+    }
+
+    // 对话轮次：优先用 data-message-author-role，退而用 article[data-turn]。
+    function conversationTurns() {
+        let nodes = [];
+        try { nodes = Array.from(document.querySelectorAll('[data-message-author-role]')); } catch { }
+        if (nodes.length) {
+            return nodes.map((node) => ({
+                role: node.getAttribute('data-message-author-role'),
+                element: node.closest('article') || node.closest('[data-turn]') || node,
+            }));
+        }
+        try { nodes = Array.from(document.querySelectorAll('article[data-turn], [data-turn]')); } catch { }
+        return nodes.map((node) => ({ role: node.getAttribute('data-turn'), element: node }));
+    }
+
+    function hasTurnActions(element) {
+        for (const selector of turnActionSelectors) {
+            try { if (element.querySelector(selector)) return true; } catch { }
+        }
         return false;
+    }
+    function hasThinkingIndicator() {
+        for (const selector of streamingHintSelectors) {
+            try { if (document.querySelector(selector)) return true; } catch { }
+        }
+        const turns = conversationTurns();
+        const last = turns[turns.length - 1];
+        if (!last) return false;
+        // 思考指示通常是最后一轮里的一小段短文本。
+        const text = String(last.element.innerText || '').trim();
+        return text.length > 0 && text.length < 40 && thinkingTextPattern.test(text);
+    }
+
+    // 供诊断输出与测试使用：给出判定依据。
+    function streamingAssessment() {
+        const turns = conversationTurns();
+        const last = turns[turns.length - 1] || null;
+        const lastRole = last ? last.role : null;
+        const lastHasActions = last ? hasTurnActions(last.element) : null;
+        const thinking = hasThinkingIndicator();
+        const stopButton = Boolean(stopButtonNode()) || submitButtonMode() === 'stop-button';
+        const quietFor = lastConversationMutationAt ? Date.now() - lastConversationMutationAt : null;
+
+        let streaming = false;
+        let reason = 'idle';
+        if (stopButton) { streaming = true; reason = 'stop-button'; }
+        else if (thinking) { streaming = true; reason = 'thinking-indicator'; }
+        else if (lastRole === 'user') { streaming = true; reason = 'awaiting-assistant'; }
+        else if (lastRole === 'assistant' && !lastHasActions) {
+            // 没有操作栏：仍在输出中；但若长时间静止，按已完成处理，避免选择器失效时卡死。
+            if (recentConversationMutationWithin(assistantSettleMilliseconds)) { streaming = true; reason = 'assistant-unfinished'; }
+            else { reason = 'assistant-settled-without-actions'; }
+        }
+        else if (recentConversationMutationWithin(conversationQuietMilliseconds)) { streaming = true; reason = 'conversation-mutating'; }
+
+        return { streaming, reason, lastRole, lastHasActions, thinking, stopButton, quietFor, turnCount: turns.length };
+    }
+    function isStreaming() {
+        return streamingAssessment().streaming;
     }
     function isSendEnabled() {
         if (isStreaming()) return false;
@@ -351,8 +446,13 @@
             submitButton: describe(submitButtonNode()),
             stopButton: describe(stopButtonNode()),
             submitButtonMode: submitButtonMode(),
-            isStreaming: isStreaming(),
+            streaming: streamingAssessment(),
             isSendEnabled: isSendEnabled(),
+            lastTurnText: (() => {
+                const turns = conversationTurns();
+                const last = turns[turns.length - 1];
+                return last ? String(last.element.innerText || '').slice(0, 80) : null;
+            })(),
             formButtons: form ? Array.from(form.querySelectorAll('button')).map(describe) : [],
         };
     }
@@ -391,19 +491,52 @@
         try { composer.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText', data: '' })); } catch { }
         try { composer.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch { }
     }
+
+    // 忽略所有空白后比较，ProseMirror 会把段落 / 空行规范化，逐字比对会误判。
+    function textMatches(actual, expected) {
+        const compact = (value) => String(value || '').replace(/\s+/g, '');
+        return compact(actual) === compact(expected);
+    }
+
+    function isComposerEmpty(composer) {
+        return !normalizeText(composer.innerText || '');
+    }
+
+    // 用 Range API 选中编辑器全部内容。比 execCommand('selectAll') 可靠：
+    // 后者在焦点没落进编辑器时会选中整页，删除自然无效，残留内容就会被后续注入插到中间。
+    function selectAllInComposer(composer) {
+        try {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(composer);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    // 三级清空，每级都校验是否真的空了；返回是否成功。
     function clearComposer() {
         const composer = composerNode();
-        if (!composer) return;
+        if (!composer) return false;
         composer.focus();
+        if (isComposerEmpty(composer)) return true;
 
+        selectAllInComposer(composer);
+        try { document.execCommand('delete', false, null); } catch { }
+        if (isComposerEmpty(composer)) { fireInputEvents(composer); return true; }
+
+        selectAllInComposer(composer);
         try {
-            document.execCommand('selectAll', false, null);
-            document.execCommand('delete', false, null);
-        } catch {
-            composer.textContent = '';
-        }
+            composer.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward' }));
+        } catch { }
+        if (isComposerEmpty(composer)) { fireInputEvents(composer); return true; }
 
+        composer.textContent = '';
         fireInputEvents(composer);
+        return isComposerEmpty(composer);
     }
 
     // ProseMirror 不接受直接改 DOM，构造 paste 事件是最贴近真实输入的注入方式。
@@ -430,24 +563,26 @@
     }
 
     // 三级回退：paste 事件 → execCommand('insertText') → 直接写 textContent。
+    // 每一级之后都校验内容是否与目标一致；清空失败则直接放弃，绝不往残留内容里插字。
     function setComposerText(text) {
         const composer = composerNode();
         if (!composer) return false;
 
         composer.focus();
-        clearComposer();
+        if (!clearComposer()) return false;
 
-        if (pasteIntoComposer(text)) {
-            // 宽松校验：ProseMirror 可能对空白做规范化，不要求完全相等。
-            if (normalizeText(composer.innerText || '').length >= normalizeText(text).length * 0.7) return true;
-        }
+        if (pasteIntoComposer(text) && textMatches(composer.innerText, text)) return true;
 
+        // paste 没生效或内容不对：重新清空再试 insertText。
+        if (!clearComposer()) return false;
         let inserted = false;
         try { inserted = document.execCommand('insertText', false, text); } catch { inserted = false; }
-        if (!inserted) composer.textContent = text;
+        if (inserted && textMatches(composer.innerText, text)) { fireInputEvents(composer); return true; }
 
+        if (!clearComposer()) return false;
+        composer.textContent = text;
         fireInputEvents(composer);
-        return true;
+        return textMatches(composer.innerText, text);
     }
 
     function moveCaretToEndOfComposer(composer) {
@@ -797,14 +932,14 @@
 
         const savedDraftText = currentComposerText();
         const nextQueuedPromptText = promptQueue[0];
-        const baselineTransactionCount = proseMirrorTransactionCounter;
 
-        setComposerText(nextQueuedPromptText);
+        // 注入失败（多半是清空不了输入框）直接放弃，绝不把队列文本插进残留内容里。
+        if (!setComposerText(nextQueuedPromptText)) return abortAttempt(savedDraftText, hooks);
 
-        // 等 ProseMirror 确认收到文本：优先看 transaction 计数，其次比对文本。
+        // 等编辑器内容与目标一致（忽略空白差异），不再以 transaction 计数作捷径——
+        // 计数变了只说明有编辑发生，不代表内容正确。
         const editorAcknowledgedText = await waitFor(
-            () => proseMirrorTransactionCounter > baselineTransactionCount
-                || currentComposerText() === normalizeText(nextQueuedPromptText),
+            () => textMatches(currentComposerText(), nextQueuedPromptText),
             transactionWaitMilliseconds
         );
         if (sendCancellationToken !== myAttemptToken) return false;
@@ -1756,6 +1891,31 @@
         setSubmitButtonMutationObserver(observer);
     }
 
+    // 观察对话区的内容变动，作为「仍在流式输出」的信号。
+    // 只记录内容级变动（增删节点 / 文本改动），忽略属性变化，避免 hover 之类的样式切换干扰；
+    // 输入区与队列面板内的变动不计入。
+    let conversationObserver = null;
+    let observedConversationRoot = null;
+    function attachConversationObserver() {
+        const root = document.querySelector('main') || document.body;
+        if (!root || root === observedConversationRoot) return;
+        observedConversationRoot = root;
+
+        conversationObserver?.disconnect();
+        conversationObserver = new MutationObserver((records) => {
+            for (const record of records) {
+                const target = record.target;
+                const element = target.nodeType === 1 ? target : target.parentElement;
+                if (!element) continue;
+                if (element.closest('form')) continue;
+                if (element.closest('#' + queueHostId)) continue;
+                noteConversationMutation();
+                return;
+            }
+        });
+        conversationObserver.observe(root, { childList: true, subtree: true, characterData: true });
+    }
+
     // ---------- SPA 路由 ----------
     function notifyUrlChange() {
         if (switchConversationIfNeeded()) {
@@ -1819,6 +1979,7 @@
         ensureQueueHost();
         attachComposerListeners();
         attachSubmitButtonObserver();
+        attachConversationObserver();
 
         if (!isDragging) renderQueue();
         positionQueueHost();

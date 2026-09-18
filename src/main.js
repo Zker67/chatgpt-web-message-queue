@@ -1,5 +1,5 @@
-import { pollIntervalMilliseconds, exitSendAnimationMilliseconds, composerMissNoticeThreshold } from './constants.js';
-import { composerNode, composerFormNode, isStreaming, reportSelectorFailureOnce, resetSelectorFailureReport, collectDiagnostics } from './platform/selectors.js';
+import { pollIntervalMilliseconds, exitSendAnimationMilliseconds, composerMissNoticeThreshold, queueHostId } from './constants.js';
+import { composerNode, composerFormNode, isStreaming, reportSelectorFailureOnce, resetSelectorFailureReport, collectDiagnostics, noteConversationMutation } from './platform/selectors.js';
 import { currentComposerText, clearComposer, sleep } from './platform/composer.js';
 import {
     promptQueue,
@@ -128,6 +128,31 @@ function attachSubmitButtonObserver() {
     setSubmitButtonMutationObserver(observer);
 }
 
+// 观察对话区的内容变动，作为「仍在流式输出」的信号。
+// 只记录内容级变动（增删节点 / 文本改动），忽略属性变化，避免 hover 之类的样式切换干扰；
+// 输入区与队列面板内的变动不计入。
+let conversationObserver = null;
+let observedConversationRoot = null;
+function attachConversationObserver() {
+    const root = document.querySelector('main') || document.body;
+    if (!root || root === observedConversationRoot) return;
+    observedConversationRoot = root;
+
+    conversationObserver?.disconnect();
+    conversationObserver = new MutationObserver((records) => {
+        for (const record of records) {
+            const target = record.target;
+            const element = target.nodeType === 1 ? target : target.parentElement;
+            if (!element) continue;
+            if (element.closest('form')) continue;
+            if (element.closest('#' + queueHostId)) continue;
+            noteConversationMutation();
+            return;
+        }
+    });
+    conversationObserver.observe(root, { childList: true, subtree: true, characterData: true });
+}
+
 // ---------- SPA 路由 ----------
 function notifyUrlChange() {
     if (switchConversationIfNeeded()) {
@@ -191,6 +216,7 @@ function tick() {
     ensureQueueHost();
     attachComposerListeners();
     attachSubmitButtonObserver();
+    attachConversationObserver();
 
     if (!isDragging) renderQueue();
     positionQueueHost();

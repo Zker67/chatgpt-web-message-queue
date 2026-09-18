@@ -153,14 +153,111 @@ export function submitButtonMode() {
     return null;
 }
 
-// 多信号综合判定是否正在生成：任何一个信号为真即视为生成中。
-export function isStreaming() {
-    if (stopButtonNode()) return true;
-    if (submitButtonMode() === 'stop-button') return true;
-    try {
-        if (document.querySelector('.result-streaming, [data-is-streaming="true"], [data-message-streaming="true"]')) return true;
-    } catch { }
+// ---------- 生成态判定 ----------
+// 新版 ChatGPT 允许生成中直接发送，生成期间右下角仍是发送箭头、没有停止按钮，
+// 所以不能再靠按钮判定，而要看对话本身的状态：
+//   · 最后一条是用户消息 → 已提问、尚未开始回答
+//   · 最后一条是助手消息但还没出现「复制 / 点赞」操作栏 → 回答尚未完成
+//   · 存在「正在思考」类指示 → 推理阶段（此时 DOM 可能长时间静止）
+//   · 对话区最近仍在持续变动 → 正在流式输出
+// 任一信号为真即视为生成中；宁可多等，不可误发。
+
+const thinkingTextPattern = /^(正在思考|思考中|正在推理|推理中|正在搜索|搜索中|正在生成|Thinking|Reasoning|Searching|Working)/i;
+
+const turnActionSelectors = [
+    '[data-testid="copy-turn-action-button"]',
+    '[data-testid*="turn-action"]',
+    '[data-testid*="good-response"]',
+    'button[aria-label*="复制"]',
+    'button[aria-label*="Copy"]',
+    'button[aria-label*="回复"]',
+    'button[aria-label*="response"]',
+];
+
+const streamingHintSelectors = [
+    '.result-streaming',
+    '.result-thinking',
+    '[data-is-streaming="true"]',
+    '[data-message-streaming="true"]',
+    'main [class*="shimmer"]',
+    'main [class*="thinking"]',
+    'main [class*="streaming"]',
+];
+
+// 对话区最近一次内容变动的时间，由 main.js 的 MutationObserver 写入。
+let lastConversationMutationAt = 0;
+export function noteConversationMutation() {
+    lastConversationMutationAt = Date.now();
+}
+// 流式输出会持续改动 DOM；这段时间内没有改动才认为它停了。
+const conversationQuietMilliseconds = 2500;
+// 助手消息既无操作栏、又无思考指示、且静止超过此时长，视为已完成（防止操作栏选择器失效导致永远"生成中"）。
+const assistantSettleMilliseconds = 10000;
+
+function recentConversationMutationWithin(milliseconds) {
+    return lastConversationMutationAt > 0 && Date.now() - lastConversationMutationAt < milliseconds;
+}
+
+// 对话轮次：优先用 data-message-author-role，退而用 article[data-turn]。
+export function conversationTurns() {
+    let nodes = [];
+    try { nodes = Array.from(document.querySelectorAll('[data-message-author-role]')); } catch { }
+    if (nodes.length) {
+        return nodes.map((node) => ({
+            role: node.getAttribute('data-message-author-role'),
+            element: node.closest('article') || node.closest('[data-turn]') || node,
+        }));
+    }
+    try { nodes = Array.from(document.querySelectorAll('article[data-turn], [data-turn]')); } catch { }
+    return nodes.map((node) => ({ role: node.getAttribute('data-turn'), element: node }));
+}
+
+function hasTurnActions(element) {
+    for (const selector of turnActionSelectors) {
+        try { if (element.querySelector(selector)) return true; } catch { }
+    }
     return false;
+}
+
+export function hasThinkingIndicator() {
+    for (const selector of streamingHintSelectors) {
+        try { if (document.querySelector(selector)) return true; } catch { }
+    }
+    const turns = conversationTurns();
+    const last = turns[turns.length - 1];
+    if (!last) return false;
+    // 思考指示通常是最后一轮里的一小段短文本。
+    const text = String(last.element.innerText || '').trim();
+    return text.length > 0 && text.length < 40 && thinkingTextPattern.test(text);
+}
+
+// 供诊断输出与测试使用：给出判定依据。
+export function streamingAssessment() {
+    const turns = conversationTurns();
+    const last = turns[turns.length - 1] || null;
+    const lastRole = last ? last.role : null;
+    const lastHasActions = last ? hasTurnActions(last.element) : null;
+    const thinking = hasThinkingIndicator();
+    const stopButton = Boolean(stopButtonNode()) || submitButtonMode() === 'stop-button';
+    const quietFor = lastConversationMutationAt ? Date.now() - lastConversationMutationAt : null;
+
+    let streaming = false;
+    let reason = 'idle';
+    if (stopButton) { streaming = true; reason = 'stop-button'; }
+    else if (thinking) { streaming = true; reason = 'thinking-indicator'; }
+    else if (lastRole === 'user') { streaming = true; reason = 'awaiting-assistant'; }
+    else if (lastRole === 'assistant' && !lastHasActions) {
+        // 没有操作栏：仍在输出中；但若长时间静止，按已完成处理，避免选择器失效时卡死。
+        if (recentConversationMutationWithin(assistantSettleMilliseconds)) { streaming = true; reason = 'assistant-unfinished'; }
+        else { reason = 'assistant-settled-without-actions'; }
+    }
+    else if (recentConversationMutationWithin(conversationQuietMilliseconds)) { streaming = true; reason = 'conversation-mutating'; }
+
+    return { streaming, reason, lastRole, lastHasActions, thinking, stopButton, quietFor, turnCount: turns.length };
+}
+
+export function isStreaming() {
+    return streamingAssessment().streaming;
 }
 
 export function isSendEnabled() {
@@ -207,8 +304,13 @@ export function collectDiagnostics() {
         submitButton: describe(submitButtonNode()),
         stopButton: describe(stopButtonNode()),
         submitButtonMode: submitButtonMode(),
-        isStreaming: isStreaming(),
+        streaming: streamingAssessment(),
         isSendEnabled: isSendEnabled(),
+        lastTurnText: (() => {
+            const turns = conversationTurns();
+            const last = turns[turns.length - 1];
+            return last ? String(last.element.innerText || '').slice(0, 80) : null;
+        })(),
         formButtons: form ? Array.from(form.querySelectorAll('button')).map(describe) : [],
     };
 }
