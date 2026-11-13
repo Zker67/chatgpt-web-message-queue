@@ -209,7 +209,14 @@ export function conversationTurns() {
         }));
     }
     try { nodes = Array.from(document.querySelectorAll('article[data-turn], [data-turn]')); } catch { }
-    return nodes.map((node) => ({ role: node.getAttribute('data-turn'), element: node }));
+    if (nodes.length) return nodes.map((node) => ({ role: node.getAttribute('data-turn'), element: node }));
+    // Current ChatGPT renders role headings instead of message-role containers.
+    // The surrounding turn carries both its lifecycle state and action bar.
+    try { nodes = Array.from(document.querySelectorAll('main [data-conversation-role]')); } catch { }
+    return nodes.map((node) => ({
+        role: node.getAttribute('data-conversation-role'),
+        element: node.closest('[data-talvt-turn-state]') || node.parentElement || node,
+    }));
 }
 
 function hasTurnActions(element) {

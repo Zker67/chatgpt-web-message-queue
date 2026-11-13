@@ -354,7 +354,14 @@
             }));
         }
         try { nodes = Array.from(document.querySelectorAll('article[data-turn], [data-turn]')); } catch { }
-        return nodes.map((node) => ({ role: node.getAttribute('data-turn'), element: node }));
+        if (nodes.length) return nodes.map((node) => ({ role: node.getAttribute('data-turn'), element: node }));
+        // Current ChatGPT renders role headings instead of message-role containers.
+        // The surrounding turn carries both its lifecycle state and action bar.
+        try { nodes = Array.from(document.querySelectorAll('main [data-conversation-role]')); } catch { }
+        return nodes.map((node) => ({
+            role: node.getAttribute('data-conversation-role'),
+            element: node.closest('[data-talvt-turn-state]') || node.parentElement || node,
+        }));
     }
 
     function hasTurnActions(element) {
@@ -488,7 +495,6 @@
     }
 
     function fireInputEvents(composer) {
-        try { composer.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText', data: '' })); } catch { }
         try { composer.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch { }
     }
 
@@ -562,27 +568,25 @@
         }
     }
 
-    // 三级回退：paste 事件 → execCommand('insertText') → 直接写 textContent。
-    // 每一级之后都校验内容是否与目标一致；清空失败则直接放弃，绝不往残留内容里插字。
+    // Replace the selected document atomically; verify the resulting visible text.
     function setComposerText(text) {
         const composer = composerNode();
         if (!composer) return false;
 
         composer.focus();
-        if (!clearComposer()) return false;
-
-        if (pasteIntoComposer(text) && textMatches(composer.innerText, text)) return true;
-
-        // paste 没生效或内容不对：重新清空再试 insertText。
-        if (!clearComposer()) return false;
-        let inserted = false;
-        try { inserted = document.execCommand('insertText', false, text); } catch { inserted = false; }
-        if (inserted && textMatches(composer.innerText, text)) { fireInputEvents(composer); return true; }
-
-        if (!clearComposer()) return false;
-        composer.textContent = text;
-        fireInputEvents(composer);
-        return textMatches(composer.innerText, text);
+        // Replace the selection in one native edit. Deleting first and immediately
+        // pasting can race ProseMirror's DOM observer: paste still sees the old
+        // document and appends the queued prompt to the saved draft.
+        if (selectAllInComposer(composer)) {
+            try {
+                document.execCommand(text ? 'insertText' : 'delete', false, text || null);
+                if (textMatches(composer.innerText, text)) return true;
+            } catch { }
+        }
+        // The fallback must also replace the selection atomically. Do not force
+        // textContent: visible DOM alone is not proof the editor accepted the edit.
+        return selectAllInComposer(composer) && pasteIntoComposer(text)
+            && textMatches(composer.innerText, text);
     }
 
     function moveCaretToEndOfComposer(composer) {
@@ -899,8 +903,9 @@
             return;
         }
 
+        // Wait for the application's asynchronous post-send clear. Restoring into
+        // a nonempty composer can append the draft to a prompt still being sent.
         if (currentText === '') setComposerText(draft);
-        else appendComposerText(`\n\n${draft}`);
 
         if (normalizeText(composer.innerText || '').includes(draft)) {
             setPendingDraftRestore(null);
@@ -935,6 +940,10 @@
 
         // 注入失败（多半是清空不了输入框）直接放弃，绝不把队列文本插进残留内容里。
         if (!setComposerText(nextQueuedPromptText)) return abortAttempt(savedDraftText, hooks);
+
+        // A native contenteditable edit updates its DOM before ProseMirror applies
+        // the corresponding transaction. Never submit that stale editor state.
+        await new Promise(requestAnimationFrame);
 
         // 等编辑器内容与目标一致（忽略空白差异），不再以 transaction 计数作捷径——
         // 计数变了只说明有编辑发生，不代表内容正确。
@@ -1906,7 +1915,10 @@
             for (const record of records) {
                 const target = record.target;
                 const element = target.nodeType === 1 ? target : target.parentElement;
-                if (!element) continue;
+                // Observer records may arrive after React detaches an old composer.
+                // Its orphaned text nodes no longer have a form ancestor and must
+                // not be mistaken for new conversation output.
+                if (!element || !element.isConnected || !root.contains(element)) continue;
                 if (element.closest('form')) continue;
                 if (element.closest('#' + queueHostId)) continue;
                 noteConversationMutation();

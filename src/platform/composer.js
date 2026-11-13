@@ -32,7 +32,6 @@ export function currentComposerText() {
 }
 
 function fireInputEvents(composer) {
-    try { composer.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText', data: '' })); } catch { }
     try { composer.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch { }
 }
 
@@ -106,27 +105,25 @@ function pasteIntoComposer(text) {
     }
 }
 
-// 三级回退：paste 事件 → execCommand('insertText') → 直接写 textContent。
-// 每一级之后都校验内容是否与目标一致；清空失败则直接放弃，绝不往残留内容里插字。
+// Replace the selected document atomically; verify the resulting visible text.
 export function setComposerText(text) {
     const composer = composerNode();
     if (!composer) return false;
 
     composer.focus();
-    if (!clearComposer()) return false;
-
-    if (pasteIntoComposer(text) && textMatches(composer.innerText, text)) return true;
-
-    // paste 没生效或内容不对：重新清空再试 insertText。
-    if (!clearComposer()) return false;
-    let inserted = false;
-    try { inserted = document.execCommand('insertText', false, text); } catch { inserted = false; }
-    if (inserted && textMatches(composer.innerText, text)) { fireInputEvents(composer); return true; }
-
-    if (!clearComposer()) return false;
-    composer.textContent = text;
-    fireInputEvents(composer);
-    return textMatches(composer.innerText, text);
+    // Replace the selection in one native edit. Deleting first and immediately
+    // pasting can race ProseMirror's DOM observer: paste still sees the old
+    // document and appends the queued prompt to the saved draft.
+    if (selectAllInComposer(composer)) {
+        try {
+            document.execCommand(text ? 'insertText' : 'delete', false, text || null);
+            if (textMatches(composer.innerText, text)) return true;
+        } catch { }
+    }
+    // The fallback must also replace the selection atomically. Do not force
+    // textContent: visible DOM alone is not proof the editor accepted the edit.
+    return selectAllInComposer(composer) && pasteIntoComposer(text)
+        && textMatches(composer.innerText, text);
 }
 
 function moveCaretToEndOfComposer(composer) {
