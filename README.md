@@ -86,6 +86,7 @@ Enter，消息进入输入框上方的队列；ChatGPT 一答完，队列里的�
 ```bash
 npm run build   # 由 src/ 构建出 dist/ 单文件用户脚本
 npm test        # 队列逻辑 + 发送流程测试（无需浏览器）
+npm run test:browser # 可选：Chrome CDP 9222，隔离空白页验证真实 DOM mutation（不访问 ChatGPT）
 npm run check   # 构建 + 语法校验 + 测试
 ```
 

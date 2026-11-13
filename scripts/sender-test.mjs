@@ -65,7 +65,7 @@ function makeHarness(queue, behaviour) {
         ${stubs}
         ${senderSource}
         promptQueue.push(...__w.initialQueue);
-        return { sendNextQueuedPrompt, pumpQueue, getQueue: () => promptQueue, tryRestorePendingDraft,
+        return { sendNextQueuedPrompt, pumpQueue, getQueue: () => promptQueue, tryRestorePendingDraft, scheduleDraftRestore,
                  getFailures: () => consecutiveSendFailures };
     `)(Object.assign(world, { initialQueue: queue, onClick: behaviour.onClick?.(world) }));
 
@@ -125,6 +125,17 @@ console.log('\n[5] 生成中不发送');
     world.streaming = true;
     const sent = await api.sendNextQueuedPrompt();
     check('生成中直接返回', sent === false && world.clicks === 0);
+}
+
+console.log('\n[5b] Draft restore waits for the application to clear the submitted prompt');
+{
+    const { world, api } = makeHarness([], { initialDraft: 'QUEUED-PROMPT-STILL-PRESENT' });
+    api.scheduleDraftRestore('UNSENT-DRAFT', 0);
+    await Promise.resolve();
+    check('does not append the draft to the submitted prompt', world.composerText === 'QUEUED-PROMPT-STILL-PRESENT');
+    world.composerText = '';
+    api.tryRestorePendingDraft();
+    check('restores the draft after the composer clears', world.composerText === 'UNSENT-DRAFT');
 }
 
 // ---------- 流式检测：中文界面 ----------

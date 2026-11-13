@@ -143,7 +143,10 @@ function attachConversationObserver() {
         for (const record of records) {
             const target = record.target;
             const element = target.nodeType === 1 ? target : target.parentElement;
-            if (!element) continue;
+            // Observer records may arrive after React detaches an old composer.
+            // Its orphaned text nodes no longer have a form ancestor and must
+            // not be mistaken for new conversation output.
+            if (!element || !element.isConnected || !root.contains(element)) continue;
             if (element.closest('form')) continue;
             if (element.closest('#' + queueHostId)) continue;
             noteConversationMutation();
